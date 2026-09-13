@@ -185,54 +185,107 @@ Relayer 为每个调用方维护一个**视图**：该调用方可见的 maker�
 - `venues`——同一数据按报价 maker 登记的 router 切片，用于按 venue 过滤
   与归属。
 
-### 3.4 `pamm_subscribe("subscribeNewQuotesV1")`——仅 WS
+### 3.4 State-override 流——`pamm_subscribe("subscribeNewQuotesV1")`（仅 WS）
 
-订阅期间按固定间隔（默认 100ms）推送同一帧。可选过滤：
-`{ "routers": ["0x…"] }` 只保留这些 venue；空 / 缺省 = 你视图内全部。
+自建模拟设施的 taker 可以把 state override 当作实时流消费，不必轮询：
+内容与 `pamm_getPammStateOverrides` 同一帧，经 WebSocket 按固定间隔
+（默认 100ms）推送。
+
+用 `pamm` 命名空间下的标准 Ethereum pub/sub 订阅：
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "pamm_subscribe",
   "params": ["subscribeNewQuotesV1", { "routers": [] }] }
 ```
 
+返回订阅 id，随后帧以 `pamm_subscription` 通知送达：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "pamm_subscription",
+  "params": {
+    "subscription": "0xcd0c3e8af590364c09d0fa6a1210faf5",
+    "result": {
+      "blockNumber": 54321099,
+      "millisTimestamp": 1789323649752,
+      "overrides": {
+        "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+          "0x09c6d2…55f1": "0x00000000000000000000000000000000000000000000000ddf4ae7657b0000"
+        }
+      },
+      "venues": [{
+        "router": "0x2a291e911864137801eb582b14fbda874b46ec94",
+        "overrides": {
+          "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+            "0x09c6d2…55f1": "0x00000000000000000000000000000000000000000000000ddf4ae7657b0000"
+          }
+        }
+      }]
+    }
+  }
+}
+```
+
+- **每一帧都是完整快照**：你视图内所有在线报价的全量。保留最新一帧，旧
+  的视为被取代——消费端不需要做增量合并。
+- `overrides` 是合并视图（`账户 → 槽 → 值`），冲突已裁决：多条报价写同
+  一个槽时，你看到的值就是成交将执行的值。`venues` 是同一数据按 maker
+  的 router 切片，用于按 venue 归属和过滤。
+- `routers` 把流收窄到你关心的 venue（空 / 缺省 = 你可见的全部）。合并
+  的 `overrides` 遵守同一过滤，两部分永远一致。
+- `overrides` 为空的帧表示此刻你的视图内没有在线报价——例如 relayer
+  刚重启。
+- 退订用 `pamm_unsubscribe([subscriptionId])`，或直接断开连接。
+
+**拿到帧怎么定价。** `overrides` 直接塞进任意节点 `eth_call` 的
+state-override 参数（`stateDiff`）：
+
+```json
+{
+  "method": "eth_call",
+  "params": [
+    { "to": "<pool>", "data": "<quote(tokenIn, tokenOut, amountIn) calldata>" },
+    "latest",
+    {
+      "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+        "stateDiff": { "0x09c6d2…55f1": "0x…7b0000" }
+      }
+    }
+  ]
+}
+```
+
+`blockNumber` 是这些报价有效的块——正在构建的那一块。如果池子在链上按
+`block.number` 校验报价新鲜度，就按这个块号模拟（支持的节点用
+`eth_call` 第 4 个参数传 block override），临近截止块的报价才能算得准。
+
 ### 3.5 价格档位（price levels）
 
-与 state-override 流不同——那是还需要你自己去模拟定价的原始存储槽——
-价格档位流是 **relayer 已经替你报好价、按 pAMM 分组**的实时订单簿梯子：
-每个 PropAMM 池的每个交易对，在你的 overlay 视图上通过池子自己的
-`IPropAMM` 接口算出。消费端不需要任何 ABI 工作和模拟设施。
+Taker 也可以直接消费**价格档位流**。与 state-override 流不同——那是还
+需要你自己去定价的原始存储——这里的档位 **relayer 已经替你报好价、按
+pAMM 分组**：你视图内每个池子、每个交易对的现成订单簿，随实时报价
+overlay 持续刷新。
 
-**梯子怎么算。** 每个 tick，relayer 取它知道的所有 PropAMM 合约——
-console 已批准 maker 登记的 router，加上运营方额外配置的——对每个合约
-枚举 `getPairs()`（每对两个方向），跳过 `isActive(tokenIn, tokenOut)` 为
-false 的方向。档位分两种：
+档位分两种：
 
-- **Simulated（模拟档）**——relayer 用合成调用方在"下一块链上状态 + 全量
-  报价 overlay"上执行 `quote(tokenIn, tokenOut, amountIn)`，`amountIn`
-  按**几何级数**取值（默认 12 档，取 4 位有效数字），覆盖宽幅交易规模
-  ——默认按输入 token 的 `decimals()` 取 0.01 到 1,000,000 个整 token
-  （运营方可按 token 固定精确区间）。遇到第一个报不出的 size（revert 或
-  出 0——size 只增不减，更大的必然也失败）梯子提前结束。
-- **Interpolated（插值档）**——为提高粒度，在相邻两个模拟档之间插入中间
-  档（默认每段 3 个）：`amountIn` 均匀分布，`amountOut` 取两个模拟邻居
-  连线上的值——线性样条，用微小的近似误差换来更顺手的 size 集合。
+- **`simulated`（模拟档）**——来自对池子
+  `quote(tokenIn, tokenOut, amountIn)` 的 EVM 模拟。报价 size 按几何级数
+  分布，一条梯子覆盖从小到大的宽幅交易规模。
+- **`interpolated`（插值档）**——在相邻模拟档之间用线性插值生成的中间
+  档：用微小的近似误差，换来更顺手的 size 集合。
 
-**快照语义。** 每条消息都是**完整快照**：保留最新一条，旧的视为被取代。
-每个 tick（默认 1s）只模拟一次、服务所有消费者；并且按需驱动——没人订阅
-或轮询时什么都不跑，maker / taker 的模拟永远优先——抢不到模拟槽的 tick
-直接跳过，上一份快照继续有效。
-
-**可见性。** 梯子在全量 overlay 上算一次，再按调用方裁剪：只有当某个池子
-登记的*所有* maker 都对你可见时它才出现在你的帧里（受限 maker 的梯子只到
-它勾选的 taker）；没有 maker 登记的池子对所有人可见。
+每条消息都是**完整快照**：保留最新一条，旧的视为被取代。同一交易对内
+档位按 `amountIn` 升序。受限 maker 的池子只有在你的 API Key 获得授权时
+才会出现——和其它接口同一套可见性规则。
 
 两种获取方式，返回同一形状：
 
-- `pamm_getPammPriceLevels`——一次性拉取。闲置后的第一次调用等一个
-  tick；模拟预算内没有 tick 完成则返回 `relayer busy, retry`。一次调用会
-  让模拟保温约 30 秒，轮询方只需等第一次。
-- `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })`——每 tick
-  WS 推送；`pamms` 非空时只保留列出的池子地址。
+- `pamm_getPammPriceLevels`——一次性 JSON-RPC 拉取。沉寂一段时间后的
+  第一次调用可能需要约一秒（梯子现算）；`relayer busy, retry` 字面意思，
+  重试即可。
+- `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })`——WebSocket
+  推送每一份新快照；`pamms` 非空时只保留列出的池子地址。
 
 ```json
 {
@@ -252,10 +305,6 @@ false 的方向。档位分两种：
   }]
 }
 ```
-
-档位按 `amountIn` 升序；`source` 取 `simulated` 或 `interpolated`。
-`pamm_status` 在 `priceLevels` 下报告梯子状态（tick 间隔、订阅数、池子数、
-档位数、上次模拟耗时）。
 
 ### 3.6 Builder 路由
 

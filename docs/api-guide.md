@@ -202,64 +202,119 @@ One-shot pull of the caller's overlay, `eth_call`-compatible:
 - `venues` — the same data sliced by the registered router of the quoting
   maker, for venue-level filtering and attribution.
 
-### 3.4 `pamm_subscribe("subscribeNewQuotesV1")` — WS only
+### 3.4 State-override stream — `pamm_subscribe("subscribeNewQuotesV1")` (WS only)
 
-Server-push of the same frame on a fixed interval (default 100 ms) while
-subscribed. Optional filter: `{ "routers": ["0x…"] }` keeps only those
-venues; empty/omitted = every venue in your view.
+Takers that run their own simulation infrastructure can consume the state
+overrides as a live stream instead of polling: the same frame as
+`pamm_getPammStateOverrides`, pushed over WebSocket on a fixed interval
+(default 100 ms).
+
+Subscribe with standard Ethereum pub/sub under the `pamm` namespace:
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "pamm_subscribe",
   "params": ["subscribeNewQuotesV1", { "routers": [] }] }
 ```
 
+The result is a subscription id; frames then arrive as `pamm_subscription`
+notifications:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "pamm_subscription",
+  "params": {
+    "subscription": "0xcd0c3e8af590364c09d0fa6a1210faf5",
+    "result": {
+      "blockNumber": 54321099,
+      "millisTimestamp": 1789323649752,
+      "overrides": {
+        "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+          "0x09c6d2…55f1": "0x00000000000000000000000000000000000000000000000ddf4ae7657b0000"
+        }
+      },
+      "venues": [{
+        "router": "0x2a291e911864137801eb582b14fbda874b46ec94",
+        "overrides": {
+          "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+            "0x09c6d2…55f1": "0x00000000000000000000000000000000000000000000000ddf4ae7657b0000"
+          }
+        }
+      }]
+    }
+  }
+}
+```
+
+- **Each frame is a complete snapshot** of every live quote in your view.
+  Keep the newest and treat older ones as superseded — no diffing on your
+  side.
+- `overrides` is the merged view (`account → slot → value`), already
+  conflict-resolved: where several quotes write the same slot, the value you
+  see is the one a fill would execute against. `venues` is the same data
+  sliced per maker router, for venue-level attribution and filtering.
+- `routers` narrows the stream to the venues you care about (empty or
+  omitted = every venue you may see). The merged `overrides` honors the same
+  filter, so the two sections always agree.
+- A frame with an empty `overrides` means there are no live quotes for your
+  view right now — for example right after a relayer restart.
+- Unsubscribe with `pamm_unsubscribe([subscriptionId])`, or just close the
+  socket.
+
+**Pricing with a frame.** `overrides` plugs directly into the state-override
+parameter of `eth_call` on any node, as `stateDiff`:
+
+```json
+{
+  "method": "eth_call",
+  "params": [
+    { "to": "<pool>", "data": "<quote(tokenIn, tokenOut, amountIn) calldata>" },
+    "latest",
+    {
+      "0x7b484a13a440d0b7312a42c7f3588bb37d4c1b65": {
+        "stateDiff": { "0x09c6d2…55f1": "0x…7b0000" }
+      }
+    }
+  ]
+}
+```
+
+`blockNumber` is the block the quotes are valid for — the one currently being
+built. If a pool checks quote freshness against `block.number` on-chain,
+simulate against that block (pass a block override, `eth_call`'s 4th
+parameter, on nodes that support it) so a quote at the edge of its deadline
+prices correctly.
+
 ### 3.5 Price levels
 
-Unlike the state-override stream — raw storage a consumer still has to quote
-against — the price-level stream is **already quoted by the relayer and
-grouped per pAMM**: a live order-book ladder for every PropAMM pool's pairs,
-computed on your overlay view through the pool's own `IPropAMM` surface. No
-ABI work, no simulation infrastructure on your side.
+Takers can also consume a live **price-level stream**. Unlike the
+state-override stream — raw storage you still have to quote against — these
+levels are **already quoted by the relayer and grouped per pAMM**: a
+ready-to-use order book for every pool and pair in your view, refreshed
+continuously against the live quote overlay.
 
-**How the ladder is built.** On each tick the relayer takes every PropAMM
-contract it knows — the routers registered by the console's approved makers,
-plus operator-configured extras — and, per contract, enumerates `getPairs()`
-(both directions of each pair) and skips directions where
-`isActive(tokenIn, tokenOut)` is false. Levels come in two variants:
+Levels come in two variants:
 
-- **Simulated** — the relayer executes `quote(tokenIn, tokenOut, amountIn)`
-  from a synthetic caller on next-block chain state plus the full quote
-  overlay, at a **geometric progression** of `amountIn` sizes (default 12
-  steps, rounded to 4 significant digits) covering a wide trade-size range —
-  by default 0.01 to 1,000,000 whole tokens read off the input token's
-  `decimals()` (the operator can pin an exact per-token range). The ladder
-  ends at the first size the pool cannot quote (revert or zero out — sizes
-  only grow, so larger ones would fail too).
-- **Interpolated** — to improve granularity, intermediate levels are inserted
-  between neighbouring simulated levels (default 3 per gap): `amountIn`
-  evenly spaced, `amountOut` on the straight line between the two simulated
-  neighbours — a linear spline, convenient sizes at the cost of a small
-  approximation error.
+- **`simulated`** — derived from EVM simulations of the pool's
+  `quote(tokenIn, tokenOut, amountIn)`. The quoted sizes follow a geometric
+  progression, so one ladder covers a wide range of trade sizes.
+- **`interpolated`** — intermediate levels generated between the simulated
+  quotes using linear interpolation: a more convenient set of sizes at the
+  cost of a small approximation error.
 
-**Snapshot semantics.** Each message is a **complete snapshot**; keep the
-newest and treat older ones as superseded. One simulation per tick (default
-1 s) serves every consumer, and it is demand-driven: nothing runs while
-nobody subscribes or polls, and maker/taker simulation always has priority —
-a tick that cannot get a slot is skipped and the previous snapshot stands.
+Each message is a **complete snapshot**: keep the newest and treat older
+ones as superseded. Within a pair, levels ascend by `amountIn`. Pools of
+makers who restricted their stream appear only when your API key is
+authorized for them — the same visibility rule as everywhere else.
 
-**Visibility.** Ladders are computed once on the full overlay, then framed
-per caller: a pool appears in your frame only if *every* maker registered on
-it is visible to you (a restricted maker's ladder reaches exactly the takers
-it ticked); pools no maker registered are shown to everyone.
+Two ways to consume, both returning the same shape:
 
-Access, both returning the same shape:
-
-- `pamm_getPammPriceLevels` — one-shot pull. The first call after idle waits
-  one tick; if no tick completes inside the simulation budget it returns
-  `relayer busy, retry`. A call keeps the simulation warm for ~30 s, so a
-  poller pays the wait only once.
-- `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })` — WS push per
-  tick; a non-empty `pamms` list keeps only those pool addresses.
+- `pamm_getPammPriceLevels` — one-shot JSON-RPC pull. The first call after a
+  quiet period may take about a second while the ladder is computed;
+  `relayer busy, retry` means exactly that.
+- `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })` — WebSocket
+  push of every new snapshot; a non-empty `pamms` list narrows the stream to
+  those pool addresses.
 
 ```json
 {
@@ -279,10 +334,6 @@ Access, both returning the same shape:
   }]
 }
 ```
-
-Levels are ascending by `amountIn`; `source` is `simulated` or
-`interpolated`. `pamm_status` reports the ladder under `priceLevels`
-(interval, subscribers, pools, level count, last compute time).
 
 ### 3.6 Builder routing
 
