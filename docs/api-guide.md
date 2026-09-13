@@ -82,7 +82,6 @@ Request `params[0]`:
 | `seq` | uint64 | strictly increasing per uuid, `> 0` |
 | `tx` | hex bytes | RLP-encoded signed tx. **Empty (`0x`) = cancel this uuid** |
 | `maxBlockNumber` | uint64 | last block (inclusive) the quote may be filled in. `0` or a value beyond the relayer's lifetime cap is clamped to `current + cap`; a value `<=` the current block is rejected |
-| `updateOnChain` | bool, optional | additionally publish the accepted quote tx to the public txpool (continuous on-chain visibility) instead of keeping it relayer-internal until matched |
 
 Response — always a *result*, never a JSON-RPC error, so one bad update never
 breaks the call channel:
@@ -115,7 +114,6 @@ Errors (in the `error` field unless noted):
 | `quote writes storage outside the allowed scope` | write-scope violation |
 | `propamm engine not ready` | node warming up / catching up; retry shortly |
 | `relayer busy, retry` | simulation concurrency cap reached |
-| `on-chain quote updates not available on this node` | `updateOnChain` requested but unsupported |
 | *(revert reason / nonce error)* | quote tx failed next-block simulation |
 
 ### 2.4 Canceling
@@ -358,7 +356,6 @@ txpool path instead — the exclusion is honored, never widened.
   "builders": ["48club", "blockrazor"],
   "pendingBundles": 0,
   "maxQuoteAgeMs": 120000,
-  "onChainUpdates": true,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
     "intervalMs": 1000, "subscribers": 1,

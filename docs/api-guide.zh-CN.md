@@ -70,7 +70,6 @@ Relayer 在下一个块上模拟后才接受：
 | `seq` | uint64 | 同 uuid 严格递增，`> 0` |
 | `tx` | hex bytes | RLP 编码签名交易。**空（`0x`）= 取消该 uuid** |
 | `maxBlockNumber` | uint64 | 可成交的最后一个块（含）。`0` 或超过 relayer 寿命上限的值被钳到 `当前块 + 上限`；`<=` 当前块拒收 |
-| `updateOnChain` | bool，可选 | 接受后额外把报价 tx 发进公共 txpool（持续上链可见），而不是留在 relayer 内部等撮合 |
 
 响应——始终作为 *result* 返回，绝不作为 JSON-RPC error，所以一条坏报价
 不会打断调用通道：
@@ -103,7 +102,6 @@ Relayer 在下一个块上模拟后才接受：
 | `quote writes storage outside the allowed scope` | 写域越界 |
 | `propamm engine not ready` | 节点预热 / 追块中；稍后重试 |
 | `relayer busy, retry` | 模拟并发达到上限 |
-| `on-chain quote updates not available on this node` | 请求了 `updateOnChain` 但该节点不支持 |
 | *（revert 原因 / nonce 错误）* | 报价 tx 下块模拟失败 |
 
 ### 2.4 取消
@@ -328,7 +326,6 @@ builder。选择跟着 taker 的 `x-api-key` 走；如果某台 relayer 上没�
   "builders": ["48club", "blockrazor"],
   "pendingBundles": 0,
   "maxQuoteAgeMs": 120000,
-  "onChainUpdates": true,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
     "intervalMs": 1000, "subscribers": 1,
