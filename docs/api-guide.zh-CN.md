@@ -40,8 +40,8 @@ Key 由运营方 console 签发、绑定角色，relayer **在内存中**校验�
   （`stale seq`）。改价 = 同 uuid、更高 seq；每次更新**完全替换**上一条。
 - **tx** 是 RLP 编码的签名报价交易——一笔写你池子 lane 的
   `PrioUpdateRegistry.updateState(...)`。Blob 交易拒收。
-- 按槽位看：当调用方可见的多条在线报价写同一个槽时，**最新收到的**赢——
-  taker 按那个值定价，成交时捆的也是那条报价。
+- 按槽位看：当调用方可见的多条在线报价写同一个槽时，**最新收到的**生效
+  ——taker 按那个值定价，成交时打进 bundle 的也是那条报价。
 - uuid 归创建它的 maker 账户所有：别的 maker 更新或取消会被拒
   （`uuid belongs to another maker`）。
 
@@ -81,23 +81,23 @@ Relayer 在下一个块上模拟后才接受：
 `timestamp` 是 relayer 的接收时间（unix 毫秒）——槽位冲突裁决和保鲜窗口
 用的就是这个时钟。
 
-错误（除注明外都在 `error` 字段）：
+错误（都在 `error` 字段返回）：
 
 | 错误 | 含义 |
 | --- | --- |
 | `missing maker API key (x-api-key header)` | 未带 Key |
-| `invalid API key` | 当前快照不认识这把 Key（已撤销 / 已轮换 / 打错） |
+| `invalid API key` | 当前快照不认识这把 Key（已撤销 / 已轮换 / 填错） |
 | `API key is not a maker key` | Key 有效但角色不对（如 taker Key） |
 | `permission directory unavailable, retry later` | relayer 没有有效 console 快照（fail closed） |
 | `uuid must be exactly 16 bytes` / `seq must be > 0` | 信封格式错误 |
 | `tx too short (N bytes); use empty tx (0x) to cancel` | tx 字段格式错误 |
 | `blob-tx is not supported as a quote` | blob 交易 |
-| `quote tx signed for a different chain id` | 链错了 |
+| `quote tx signed for a different chain id` | 签名的 chain id 与 relayer 所在链不符 |
 | `stale seq` | seq 不高于该 uuid 已接受的最新值 |
 | `uuid has been canceled` | 已取消的 uuid 永久退役——换新 uuid |
-| `uuid belongs to another maker` | 动了别人的报价流 |
-| `the maxBlockNumber must be greater than currentBlockNum` | 到达时已过期 |
-| `quote expired on arrival` | 截止块解析后低于下一个块 |
+| `uuid belongs to another maker` | 更新或取消了别的账户的报价流 |
+| `the maxBlockNumber must be greater than currentBlockNum` | 到达时 `maxBlockNumber` 已不高于当前块 |
+| `quote expired on arrival` | 截止块赶不上 bundle 可能落地的下一个块 |
 | `quote gas limit above simulation cap` | gas limit 超模拟上限 |
 | `quote writes storage outside the allowed scope` | 写域越界 |
 | `propamm engine not ready` | 节点预热 / 追块中；稍后重试 |
@@ -112,13 +112,13 @@ Relayer 在下一个块上模拟后才接受：
 { "uuid": "0x1bd6...1c44", "seq": 8, "tx": "0x", "maxBlockNumber": 0 }
 ```
 
-报价立即离池，uuid **永久退役**（此后一律 `uuid has been canceled`）——
-换新 uuid 继续。取消*之前*已撮合的 bundle 仍可能落地，上限是该报价的
-`maxBlockNumber`。
+报价立即失效、不再可成交，uuid **永久退役**（此后一律
+`uuid has been canceled`）——换新 uuid 继续。取消*之前*已撮合的 bundle
+仍可能落地，上限是该报价的 `maxBlockNumber`。
 
 ### 2.5 生命周期
 
-以下任一先发生，报价即离池：
+以下任一先发生，报价即失效：
 
 - **被替换**——同 uuid 更高 seq；
 - **被取消**——空 tx 更新（uuid 退役）；
@@ -154,7 +154,7 @@ Relayer 为每个调用方维护一个**视图**：该调用方可见的 maker�
 2. 在你的 overlay 上模拟，记录读到的每个存储槽；
 3. 把读到的每个被报价槽位归属到可见范围内最新的那条报价；
 4. 组装 `[报价 tx…（旧在前）, 你的 tx]`，干净状态复模拟——报价 tx 可
-   丢弃（丢弃即物理剔除），你的 tx 必须成功，全程无 revertible；
+   丢弃（丢弃即物理剔除），你的 tx 必须成功，没有任何允许 revert 的成分；
 5. bundle 的截止块钳到所匹配报价中最早的 `maxBlockNumber`，并行广播给
    选中的 builder。
 
@@ -280,8 +280,8 @@ overlay 持续刷新。
 两种获取方式，返回同一形状：
 
 - `pamm_getPammPriceLevels`——一次性 JSON-RPC 拉取。沉寂一段时间后的
-  第一次调用可能需要约一秒（梯子现算）；`relayer busy, retry` 字面意思，
-  重试即可。
+  第一次调用可能需要约一秒（梯子需要现场计算）；遇到
+  `relayer busy, retry` 重试即可。
 - `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })`——WebSocket
   推送每一份新快照；`pamms` 非空时只保留列出的池子地址。
 
@@ -355,9 +355,9 @@ builder。选择跟着 taker 的 `x-api-key` 走；如果某台 relayer 上没�
 
 - **可见性是视图，不是事后过滤。** 定价、venue 归属、撮合、builder 路由
   都从每请求一份的快照解析；按槽位取*调用方可见*的最新报价，所以隐藏
-  maker 的更新报价永远不会遮住可见 maker 的值，taker 捆的就是给它定价的
-  那条报价。
+  maker 的更新报价永远不会遮住可见 maker 的值，taker 成交时打进 bundle
+  的就是给它定价的那条报价。
 - **保鲜按块对齐。** 每个新块清一次过期 / 超龄 / 已消耗的报价；请求路径
-  不做逐次age检查——bundle 反正落不进当前块。
+  不做按请求的时效检查——bundle 反正落不进当前块。
 - **原子性。** 报价 tx 旧在前，最新报价是每个争用槽的最后写者；taker tx
-  必须成功；PropAMM bundle 里没有任何 revertible 成分。
+  必须成功；PropAMM bundle 里没有任何允许 revert 的成分。

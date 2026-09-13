@@ -24,7 +24,7 @@ One header carries identity:
 
 | Header | Who | Behavior |
 | --- | --- | --- |
-| `x-api-key` | maker | **Required** for `pamm_sendQuoteUpdateV1`. Must be a console-issued **maker** key: a keyless update is rejected (`missing maker API key (x-api-key header)`), an unknown key as `invalid API key`, a valid key of the wrong role as `API key is not a maker key`. |
+| `x-api-key` | maker | **Required** for `pamm_sendQuoteUpdateV1`, and must be a console-issued **maker** key. A keyless update is rejected with `missing maker API key (x-api-key header)`, an unknown key with `invalid API key`, and a valid key of the wrong role with `API key is not a maker key`. |
 | `x-api-key` | taker | **Optional** everywhere else. A taker key widens the caller's view with the restricted makers that ticked it and applies the taker's builder routing. An unknown key silently degrades to the anonymous public view — identity never breaks a read. |
 
 Keys are issued in the operator's console, role-bound, and verified by the
@@ -46,8 +46,8 @@ at the next snapshot refresh, including on live WebSocket connections.
 - **tx** is the RLP-encoded signed quote transaction — a
   `PrioUpdateRegistry.updateState(...)` call writing your pool's lane(s).
   Blob transactions are rejected.
-- Per storage slot, when several live quotes a caller may see write the same
-  slot, the **most recently received** one wins — that value prices the
+- Per storage slot, when several live quotes visible to a caller write the
+  same slot, the **most recently received** one wins — that value prices the
   taker, and that quote is what gets bundled.
 - A uuid belongs to the maker account that created it: an update or cancel
   from another maker is refused (`uuid belongs to another maker`).
@@ -61,7 +61,7 @@ The relayer simulates the tx on the next block before accepting it:
 - Sign with the sender's **current on-chain nonce**; every update of the
   stream reuses that nonce (the tx only lands when filled). Once the nonce
   advances on chain, the live quote is treated as **consumed** and removed;
-  re-key the next update with the new nonce.
+  sign the next update with the new nonce.
 - Keep it a **pure setter** — storage writes must depend only on calldata.
   The captured write-set is reused as-is until the next update.
 - The tx must be signed for the relayer's chain id, and its gas limit must
@@ -93,7 +93,7 @@ breaks the call channel:
 `timestamp` is the relayer's receive time (unix millis) — the freshness clock
 used for slot-level conflict resolution and the maker freshness window.
 
-Errors (in the `error` field unless noted):
+Errors, always in the `error` field:
 
 | Error | Meaning |
 | --- | --- |
@@ -108,8 +108,8 @@ Errors (in the `error` field unless noted):
 | `stale seq` | seq not above the latest accepted for the uuid |
 | `uuid has been canceled` | canceled uuids are permanently retired — start a new uuid |
 | `uuid belongs to another maker` | update/cancel of a stream owned by a different account |
-| `the maxBlockNumber must be greater than currentBlockNum` | expired on arrival |
-| `quote expired on arrival` | deadline resolved below the next block |
+| `the maxBlockNumber must be greater than currentBlockNum` | `maxBlockNumber` was at or below the current block when the update arrived |
+| `quote expired on arrival` | the deadline cannot reach the next block a bundle could land in |
 | `quote gas limit above simulation cap` | tx gas limit over the node's cap |
 | `quote writes storage outside the allowed scope` | write-scope violation |
 | `propamm engine not ready` | node warming up / catching up; retry shortly |
@@ -124,14 +124,14 @@ Same uuid, higher seq, empty tx:
 { "uuid": "0x1bd6...1c44", "seq": 8, "tx": "0x", "maxBlockNumber": 0 }
 ```
 
-The quote leaves the pool immediately and the uuid is **permanently
+The quote stops being fillable immediately and the uuid is **permanently
 retired** (`uuid has been canceled` thereafter) — continue under a fresh
 uuid. A bundle matched *before* the cancel may still land, bounded by the
 quote's `maxBlockNumber`.
 
 ### 2.5 Lifecycle
 
-A quote leaves the pool when any of these happens first:
+A quote stops being live when any of these happens first:
 
 - **replaced** — same uuid, higher seq;
 - **canceled** — empty-tx update (uuid retired);
@@ -158,7 +158,7 @@ caller's taker key). Simulation methods apply the view automatically:
 | `eth_estimateGas` | same overlay semantics |
 | `debug_traceCall` | same overlay semantics (complete tip post-state only) |
 
-No PropAMM-specific request shape: quote a pool's `IPropAMM.quote`/`swap`
+No PropAMM-specific request shape: call a pool's `IPropAMM.quote` / `swap`
 like any other contract.
 
 ### 3.2 `eth_sendRawTransaction`
@@ -287,7 +287,7 @@ prices correctly.
 
 Takers can also consume a live **price-level stream**. Unlike the
 state-override stream — raw storage you still have to quote against — these
-levels are **already quoted by the relayer and grouped per pAMM**: a
+levels are **already quoted by the relayer and grouped per pool**: a
 ready-to-use order book for every pool and pair in your view, refreshed
 continuously against the live quote overlay.
 

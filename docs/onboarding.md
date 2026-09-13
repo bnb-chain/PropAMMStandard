@@ -91,10 +91,10 @@ Two registry facts shape your slot layout (full model:
   overwrite a newer one, whoever submits it.
 - **Freshness is your job.** The registry stores no expiry. Pack your own
   deadline into the lane — e.g. slot 0 = `price` plus a `maxBlockNumber`
-  within the 208 data bits — and have the pool revert (`StaleUpdate`-style)
-  once `block.number` passes it. The relayer independently enforces each
-  quote's `maxBlockNumber` off-chain, but your pool must not trust that
-  alone: on-chain state outlives the relayer's window.
+  within the 208 data bits — and have the pool revert once `block.number`
+  passes it. The relayer independently enforces each quote's
+  `maxBlockNumber` off-chain, but your pool must not trust that alone:
+  on-chain state outlives the relayer's window.
 
 ### 2. Authorize your quoting EOA on the registry
 
@@ -160,7 +160,7 @@ rejects it if it fails:
 - Sign with the EOA's **current on-chain nonce**; since the tx does not land
   on its own, **every update of the stream reuses that nonce**. Once the
   nonce advances on chain (a fill, or any other tx you send), the live quote
-  is *consumed* and dropped — re-key the next update with the new nonce.
+  is *consumed* and dropped — sign the next update with the new nonce.
 - Keep it a **pure setter**: writes must depend only on calldata. The
   captured write-set is reused as-is until replaced.
 - All quote txs from one EOA share a nonce, so two of your streams can never
