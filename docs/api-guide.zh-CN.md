@@ -195,32 +195,67 @@ Relayer 为每个调用方维护一个**视图**：该调用方可见的 maker�
   "params": ["subscribeNewQuotesV1", { "routers": [] }] }
 ```
 
-### 3.5 价格梯子
+### 3.5 价格档位（price levels）
 
-现成的价格档位——所有 PropAMM 池的交易对在多个 size 上按**你的**视图
-定价，有需求时按固定 tick 重新模拟：
+与 state-override 流不同——那是还需要你自己去模拟定价的原始存储槽——
+价格档位流是 **relayer 已经替你报好价、按 pAMM 分组**的实时订单簿梯子：
+每个 PropAMM 池的每个交易对，在你的 overlay 视图上通过池子自己的
+`IPropAMM` 接口算出。消费端不需要任何 ABI 工作和模拟设施。
 
-- `pamm_getPammPriceLevels`——一次性拉取（闲置后的第一次调用会等一个
-  tick）。
+**梯子怎么算。** 每个 tick，relayer 取它知道的所有 PropAMM 合约——
+console 已批准 maker 登记的 router，加上运营方额外配置的——对每个合约
+枚举 `getPairs()`（每对两个方向），跳过 `isActive(tokenIn, tokenOut)` 为
+false 的方向。档位分两种：
+
+- **Simulated（模拟档）**——relayer 用合成调用方在"下一块链上状态 + 全量
+  报价 overlay"上执行 `quote(tokenIn, tokenOut, amountIn)`，`amountIn`
+  按**几何级数**取值（默认 12 档，取 4 位有效数字），覆盖宽幅交易规模
+  ——默认按输入 token 的 `decimals()` 取 0.01 到 1,000,000 个整 token
+  （运营方可按 token 固定精确区间）。遇到第一个报不出的 size（revert 或
+  出 0——size 只增不减，更大的必然也失败）梯子提前结束。
+- **Interpolated（插值档）**——为提高粒度，在相邻两个模拟档之间插入中间
+  档（默认每段 3 个）：`amountIn` 均匀分布，`amountOut` 取两个模拟邻居
+  连线上的值——线性样条，用微小的近似误差换来更顺手的 size 集合。
+
+**快照语义。** 每条消息都是**完整快照**：保留最新一条，旧的视为被取代。
+每个 tick（默认 1s）只模拟一次、服务所有消费者；并且按需驱动——没人订阅
+或轮询时什么都不跑，maker / taker 的模拟永远优先——抢不到模拟槽的 tick
+直接跳过，上一份快照继续有效。
+
+**可见性。** 梯子在全量 overlay 上算一次，再按调用方裁剪：只有当某个池子
+登记的*所有* maker 都对你可见时它才出现在你的帧里（受限 maker 的梯子只到
+它勾选的 taker）；没有 maker 登记的池子对所有人可见。
+
+两种获取方式，返回同一形状：
+
+- `pamm_getPammPriceLevels`——一次性拉取。闲置后的第一次调用等一个
+  tick；模拟预算内没有 tick 完成则返回 `relayer busy, retry`。一次调用会
+  让模拟保温约 30 秒，轮询方只需等第一次。
 - `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })`——每 tick
-  WS 推送；过滤器只保留列出的池子地址。
+  WS 推送；`pamms` 非空时只保留列出的池子地址。
 
 ```json
 {
   "blockNumber": 54321099,
   "millisTimestamp": 1789323649752,
   "pamms": [{
-    "pamm": "0xPool",
+    "pamm": "0x5979458912f80b96d30d4220af8e2e4925a33320",
     "pairs": [{
-      "tokenIn": "0xA", "tokenOut": "0xB",
+      "tokenIn": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "tokenOut": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
       "levels": [
-        { "amountIn": "0xde0b6b3a7640000", "amountOut": "0x…", "source": "simulated" },
-        { "amountIn": "0x1bc16d674ec80000", "amountOut": "0x…", "source": "interpolated" }
+        { "amountIn": "0x989680",  "amountOut": "0x174b67393", "source": "simulated" },
+        { "amountIn": "0xaa810a",  "amountOut": "0x1a0781260", "source": "interpolated" },
+        { "amountIn": "0xbc6b0a4", "amountOut": "0x1cc38b120", "source": "simulated" }
       ]
     }]
   }]
 }
 ```
+
+档位按 `amountIn` 升序；`source` 取 `simulated` 或 `interpolated`。
+`pamm_status` 在 `priceLevels` 下报告梯子状态（tick 间隔、订阅数、池子数、
+档位数、上次模拟耗时）。
 
 ### 3.6 Builder 路由
 
@@ -245,6 +280,12 @@ builder。选择跟着 taker 的 `x-api-key` 走；如果某台 relayer 上没�
   "pendingBundles": 0,
   "maxQuoteAgeMs": 120000,
   "onChainUpdates": true,
+  "quoteStreamSubscribers": 0,
+  "priceLevels": {
+    "intervalMs": 1000, "subscribers": 1,
+    "pamms": 1, "levels": 45,
+    "computedAt": 1789323649752, "lastComputeMs": 12
+  },
   "directory": {
     "console": "https://console.example", "loaded": true,
     "snapshotAt": 1789323649752, "generatedAt": "2026-09-13T18:20:49.775Z",

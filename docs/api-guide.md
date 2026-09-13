@@ -215,30 +215,74 @@ venues; empty/omitted = every venue in your view.
 
 ### 3.5 Price levels
 
-A ready-made ladder — every PropAMM pool's pairs quoted at a range of sizes
-on **your** view, re-simulated on a fixed tick while there is demand:
+Unlike the state-override stream — raw storage a consumer still has to quote
+against — the price-level stream is **already quoted by the relayer and
+grouped per pAMM**: a live order-book ladder for every PropAMM pool's pairs,
+computed on your overlay view through the pool's own `IPropAMM` surface. No
+ABI work, no simulation infrastructure on your side.
 
-- `pamm_getPammPriceLevels` — one-shot (the first call after idle waits one
-  tick).
+**How the ladder is built.** On each tick the relayer takes every PropAMM
+contract it knows — the routers registered by the console's approved makers,
+plus operator-configured extras — and, per contract, enumerates `getPairs()`
+(both directions of each pair) and skips directions where
+`isActive(tokenIn, tokenOut)` is false. Levels come in two variants:
+
+- **Simulated** — the relayer executes `quote(tokenIn, tokenOut, amountIn)`
+  from a synthetic caller on next-block chain state plus the full quote
+  overlay, at a **geometric progression** of `amountIn` sizes (default 12
+  steps, rounded to 4 significant digits) covering a wide trade-size range —
+  by default 0.01 to 1,000,000 whole tokens read off the input token's
+  `decimals()` (the operator can pin an exact per-token range). The ladder
+  ends at the first size the pool cannot quote (revert or zero out — sizes
+  only grow, so larger ones would fail too).
+- **Interpolated** — to improve granularity, intermediate levels are inserted
+  between neighbouring simulated levels (default 3 per gap): `amountIn`
+  evenly spaced, `amountOut` on the straight line between the two simulated
+  neighbours — a linear spline, convenient sizes at the cost of a small
+  approximation error.
+
+**Snapshot semantics.** Each message is a **complete snapshot**; keep the
+newest and treat older ones as superseded. One simulation per tick (default
+1 s) serves every consumer, and it is demand-driven: nothing runs while
+nobody subscribes or polls, and maker/taker simulation always has priority —
+a tick that cannot get a slot is skipped and the previous snapshot stands.
+
+**Visibility.** Ladders are computed once on the full overlay, then framed
+per caller: a pool appears in your frame only if *every* maker registered on
+it is visible to you (a restricted maker's ladder reaches exactly the takers
+it ticked); pools no maker registered are shown to everyone.
+
+Access, both returning the same shape:
+
+- `pamm_getPammPriceLevels` — one-shot pull. The first call after idle waits
+  one tick; if no tick completes inside the simulation budget it returns
+  `relayer busy, retry`. A call keeps the simulation warm for ~30 s, so a
+  poller pays the wait only once.
 - `pamm_subscribe("subscribePriceLevelsV1", { "pamms": [] })` — WS push per
-  tick; the filter keeps only the listed pool addresses.
+  tick; a non-empty `pamms` list keeps only those pool addresses.
 
 ```json
 {
   "blockNumber": 54321099,
   "millisTimestamp": 1789323649752,
   "pamms": [{
-    "pamm": "0xPool",
+    "pamm": "0x5979458912f80b96d30d4220af8e2e4925a33320",
     "pairs": [{
-      "tokenIn": "0xA", "tokenOut": "0xB",
+      "tokenIn": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "tokenOut": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
       "levels": [
-        { "amountIn": "0xde0b6b3a7640000", "amountOut": "0x…", "source": "simulated" },
-        { "amountIn": "0x1bc16d674ec80000", "amountOut": "0x…", "source": "interpolated" }
+        { "amountIn": "0x989680",  "amountOut": "0x174b67393", "source": "simulated" },
+        { "amountIn": "0xaa810a",  "amountOut": "0x1a0781260", "source": "interpolated" },
+        { "amountIn": "0xbc6b0a4", "amountOut": "0x1cc38b120", "source": "simulated" }
       ]
     }]
   }]
 }
 ```
+
+Levels are ascending by `amountIn`; `source` is `simulated` or
+`interpolated`. `pamm_status` reports the ladder under `priceLevels`
+(interval, subscribers, pools, level count, last compute time).
 
 ### 3.6 Builder routing
 
@@ -264,6 +308,12 @@ txpool path instead — the exclusion is honored, never widened.
   "pendingBundles": 0,
   "maxQuoteAgeMs": 120000,
   "onChainUpdates": true,
+  "quoteStreamSubscribers": 0,
+  "priceLevels": {
+    "intervalMs": 1000, "subscribers": 1,
+    "pamms": 1, "levels": 45,
+    "computedAt": 1789323649752, "lastComputeMs": 12
+  },
   "directory": {
     "console": "https://console.example", "loaded": true,
     "snapshotAt": 1789323649752, "generatedAt": "2026-09-13T18:20:49.775Z",
