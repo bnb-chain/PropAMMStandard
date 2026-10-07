@@ -101,4 +101,8 @@ e2e/
 - [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — motivation, architecture and
   specification. This guide tracks revision
   [`e7db450`](https://github.com/asiawildboar/BEPs/blob/e7db450ce84501e1f040bb674ae028b83ac7cf08/BAPs/BAP-710.md).
-- Upstream inspiration: [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry).
+- Upstream inspiration:
+  [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)
+  (the registry) and
+  [lambdaclass/propamm-router-contracts](https://github.com/lambdaclass/propamm-router-contracts/blob/main/src/interfaces/IPropAMM.sol)
+  (the `IPropAMM` pool interface).

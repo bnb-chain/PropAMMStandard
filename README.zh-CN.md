@@ -88,4 +88,8 @@ e2e/
 - [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — 动机、架构与
   规范。本指南对应修订版
   [`e7db450`](https://github.com/asiawildboar/BEPs/blob/e7db450ce84501e1f040bb674ae028b83ac7cf08/BAPs/BAP-710.md)。
-- 上游启发：[flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)。
+- 上游启发：
+  [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)
+  （注册表）与
+  [lambdaclass/propamm-router-contracts](https://github.com/lambdaclass/propamm-router-contracts/blob/main/src/interfaces/IPropAMM.sol)
+  （`IPropAMM` 池子接口）。
