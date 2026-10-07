@@ -28,23 +28,9 @@ function httpToWs(url) {
 let n = 0;
 function printFrame(frame) {
     n++;
-    const pamms = (frame && frame.pamms) || [];
-    log(`#${n} block=${frame.blockNumber} ts=${frame.millisTimestamp} pamms=${pamms.length}`);
-    for (const p of pamms) {
-        log(`  pamm ${p.pamm}: ${p.pairs.length} direction(s)`);
-        for (const pair of p.pairs) {
-            const sim = pair.levels.filter((l) => l.source === "simulated").length;
-            log(`    ${pair.tokenIn} -> ${pair.tokenOut}: ${pair.levels.length} level(s), ${sim} simulated`);
-            for (const l of pair.levels) {
-                const amountIn = BigInt(l.amountIn);
-                const amountOut = BigInt(l.amountOut);
-                // 1e18-scaled out/in ratio, shown with 6 decimals; only a
-                // sanity print — the tokens' decimals are not looked up.
-                const ratio = amountIn === 0n ? 0n : (amountOut * 1000000n) / amountIn;
-                log(`      ${l.source.padEnd(12)} in=${amountIn} out=${amountOut} out/in=${(Number(ratio) / 1e6).toFixed(6)}`);
-            }
-        }
-    }
+    // Print the frame exactly as the API returned it (amounts stay hex).
+    log(`#${n}`);
+    console.log(JSON.stringify(frame, null, 2));
 }
 
 async function main() {

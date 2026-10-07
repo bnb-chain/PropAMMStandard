@@ -22,8 +22,11 @@ const ORACLE_ABI = [
 ];
 
 // ExamplePammRouter: quote to price, swap to fill (both exact-input,
-// pull-payment: swap transferFroms tokenIn from msg.sender, so the taker only
-// approves the router once). Its lane slot 0 is
+// push-payment per IPropAMM: the caller transfers amountIn of tokenIn to the
+// router BEFORE calling swap; swap checks the balance pushed above the
+// router's booked inventory and pays tokenOut from that inventory; funding is
+// transfer + sync(token) on the contract, not something the e2e calls). Its
+// lane slot 0 is
 //   bits [208,255] : seq            (registry-written, masked out by the router)
 //   bits [160,207] : maxBlockNumber (inclusive freshness deadline, validated on read)
 //   bits [0,159]   : price          (1e18-scaled "tokenOut per 1 tokenIn")
@@ -44,6 +47,7 @@ const ROUTER_ABI = [
     "event Swapped(address indexed sender, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut, address recipient)",
     "error NoPrice()",
     "error ZeroAmount()",
+    "error InsufficientInput(uint256 required, uint256 pushed)",
     "error InsufficientOutput(uint256 amountOut, uint256 minAmountOut)",
     "error SwapExpired(uint256 blockNumber, uint256 maxBlockNumber)",
     "error StaleUpdate()",
@@ -54,7 +58,20 @@ const ROUTER_ABI = [
     "error PairExists()",
 ];
 
+// ExamplePammTaker: one-tx push + swap against any IPropAMM pool. The caller
+// approves it for tokenIn; it transferFroms straight into the pool and calls
+// pool.swap, tokenOut going to recipient.
+const TAKER_ABI = [
+    "function swap(address pool, address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, address recipient, uint256 maxBlockNumber) returns (uint256 amountOut)",
+    "event Filled(address indexed sender, address indexed pool, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, address recipient)",
+    "function owner() view returns (address)",
+    "error NotOwner()",
+    "error TransferFailed()",
+    "error InsufficientOutput(uint256 amountOut, uint256 minAmountOut)",
+];
+
 const ERC20_ABI = [
+    "function transfer(address to, uint256 amount) returns (bool)",
     "function approve(address spender, uint256 amount) returns (bool)",
     "function allowance(address owner, address spender) view returns (uint256)",
     "function balanceOf(address account) view returns (uint256)",
@@ -62,6 +79,7 @@ const ERC20_ABI = [
 
 const oracleIface = new ethers.utils.Interface(ORACLE_ABI);
 const routerIface = new ethers.utils.Interface(ROUTER_ABI);
+const takerIface = new ethers.utils.Interface(TAKER_ABI);
 const erc20Iface = new ethers.utils.Interface(ERC20_ABI);
 
 // Best-effort decode of eth_call revert data against the router + oracle
@@ -98,9 +116,11 @@ function decodeRevert(data) {
 module.exports = {
     ORACLE_ABI,
     ROUTER_ABI,
+    TAKER_ABI,
     ERC20_ABI,
     oracleIface,
     routerIface,
+    takerIface,
     erc20Iface,
     decodeRevert,
 };

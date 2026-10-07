@@ -27,3 +27,12 @@ profile.cov
 
 # VS Code
 .vscode
+
+# PropAMM guide
+node_modules/
+*.log
+.env
+contracts/lib/
+contracts/out/
+contracts/cache/
+contracts/broadcast/

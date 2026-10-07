@@ -5,11 +5,12 @@
 The Unified PropAMM Relayer is a BNB Chain full node with one extra JSON-RPC
 namespace (`pamm_*`) for makers and operators, and PropAMM-aware behavior
 behind the standard EVM methods takers already use. This guide is the wire
-reference for both sides.
+reference for both sides; the normative specification is
+[BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.4–§4.8.
 
 - Maker: [§2](#2-maker-sending-quotes) — `pamm_sendQuoteUpdateV1`.
-- Taker: [§3](#3-taker-pricing-and-filling) — `eth_call` / `eth_estimateGas`
-  / `debug_traceCall` / `eth_sendRawTransaction`, plus the overlay and
+- Taker: [§3](#3-taker-pricing-and-filling) — `eth_call` / `debug_traceCall`
+  / `eth_sendRawTransaction`, plus the overlay and
   price-level streams.
 - Ops: [§4](#4-operational-introspection) — `pamm_status`.
 
@@ -20,6 +21,10 @@ reference for both sides.
 The relayer serves HTTP and WebSocket JSON-RPC. Subscriptions
 (`pamm_subscribe`) are WebSocket-only; everything else works on both.
 
+A deployment MAY restrict JSON-RPC methods other than the ones in this guide.
+Keep your existing BSC RPC endpoint for general chain reads
+(`eth_chainId`, `eth_blockNumber`, `eth_getTransactionCount`, receipts, …).
+
 One header carries identity:
 
 | Header | Who | Behavior |
@@ -27,10 +32,20 @@ One header carries identity:
 | `x-api-key` | maker | **Required** for `pamm_sendQuoteUpdateV1`, and must be a console-issued **maker** key. A keyless update is rejected with `missing maker API key (x-api-key header)`, an unknown key with `invalid API key`, and a valid key of the wrong role with `API key is not a maker key`. |
 | `x-api-key` | taker | **Optional** everywhere else. A taker key widens the caller's view with the restricted makers that ticked it and applies the taker's builder routing. An unknown key silently degrades to the anonymous public view — identity never breaks a read. |
 
+On WebSocket the header is read once from the upgrade handshake and applies
+to every call on that connection.
+
 Keys are issued in the operator's console, role-bound, and verified by the
 relayer **in memory** (SHA-256 lookup against a periodically refreshed
-snapshot — no per-request console call). Rotation and revocation take effect
-at the next snapshot refresh, including on live WebSocket connections.
+snapshot, by default once a minute — no per-request console call). Rotation
+and revocation take effect at the next snapshot refresh, including on live
+WebSocket connections. If the snapshot was never loaded or is older than
+`max(10 × refresh interval, 5 minutes)`, the relayer **fails closed**: it
+refuses quote updates and prices or matches no caller on any quote.
+
+Identity is the API key, never the transaction sender: a taker's view and
+builder routing come from the key on the request, whoever signed the
+transaction.
 
 ---
 
@@ -43,9 +58,16 @@ at the next snapshot refresh, including on live WebSocket connections.
 - **seq** is strictly increasing per uuid (`> 0`). An update with
   `seq <= latest` is dropped (`stale seq`). Updating a quote = same uuid,
   higher seq; each update fully **replaces** the previous one.
-- **tx** is the RLP-encoded signed quote transaction — a
-  `PrioUpdateRegistry.updateState(...)` call writing your pool's lane(s).
-  Blob transactions are rejected.
+- **tx** is the signed quote transaction (EIP-2718 encoding; blob
+  transactions are rejected). It SHOULD only write your pool's lanes in the
+  `PrioUpdateRegistry`, either as
+  - a direct `updateState(...)` / `updateStateBatch(...)` from an updater
+    key your pool authorized, or
+  - an `updateStateWithDecoder(...)` call carrying a payload signed by your
+    pool's signer (BAP-710 §4.2.3), which may be sent from any account.
+
+  The relayer does not inspect calldata; it judges the transaction by its
+  next-block simulation and, if the operator configured one, its write scope.
 - Per storage slot, when several live quotes visible to a caller write the
   same slot, the **most recently received** one wins — that value prices the
   taker, and that quote is what gets bundled.
@@ -64,6 +86,8 @@ The relayer simulates the tx on the next block before accepting it:
   sign the next update with the new nonce.
 - Keep it a **pure setter** — storage writes must depend only on calldata.
   The captured write-set is reused as-is until the next update.
+- The sending account must hold enough BNB to pass the next-block
+  simulation's balance check (gas is only spent when a fill lands the tx).
 - The tx must be signed for the relayer's chain id, and its gas limit must
   fit the node's simulation cap.
 - The operator may confine quote writes to the standard contracts
@@ -80,20 +104,29 @@ Request `params[0]`:
 | --- | --- | --- |
 | `uuid` | hex bytes | exactly 16 bytes |
 | `seq` | uint64 | strictly increasing per uuid, `> 0` |
-| `tx` | hex bytes | RLP-encoded signed tx. **Empty (`0x`) = cancel this uuid** |
-| `maxBlockNumber` | uint64 | last block (inclusive) the quote may be filled in. `0` or a value beyond the relayer's lifetime cap is clamped to `current + cap`; a value `<=` the current block is rejected |
+| `tx` | hex bytes | EIP-2718-encoded signed tx. **Empty (`0x`) = cancel this uuid** |
+| `maxBlockNumber` | uint64 | last block (inclusive) the quote may be filled in. `0` or a value beyond the relayer's lifetime cap is clamped to `head + cap` (reference default: 100 blocks); a value `<=` the current head is rejected |
+
+Your maker identity and pool are not request fields: both come from the API
+key and the console (§1).
 
 Response — always a *result*, never a JSON-RPC error, so one bad update never
-breaks the call channel:
+breaks the call channel. An accepted update has no `error` field:
 
 ```json
-{ "uuid": "0x1bd6cf1ad7a55f1d7e0c8a17b32a1c44", "seq": 7, "timestamp": 1789323649752, "error": "" }
+{ "uuid": "0x1bd6cf1ad7a55f1d7e0c8a17b32a1c44", "seq": 7, "timestamp": 1789323649752 }
+```
+
+A rejected one carries the reason:
+
+```json
+{ "uuid": "0x1bd6cf1ad7a55f1d7e0c8a17b32a1c44", "seq": 7, "timestamp": 1789323649752, "error": "stale seq" }
 ```
 
 `timestamp` is the relayer's receive time (unix millis) — the freshness clock
 used for slot-level conflict resolution and the maker freshness window.
 
-Errors, always in the `error` field:
+Errors, always in the `error` field (reference implementation):
 
 | Error | Meaning |
 | --- | --- |
@@ -103,18 +136,19 @@ Errors, always in the `error` field:
 | `permission directory unavailable, retry later` | the relayer has no valid console snapshot (fails closed) |
 | `uuid must be exactly 16 bytes` / `seq must be > 0` | malformed envelope |
 | `tx too short (N bytes); use empty tx (0x) to cancel` | malformed tx field |
+| *(transaction decoding error)* | `tx` is not a valid EIP-2718 transaction |
 | `blob-tx is not supported as a quote` | blob transaction |
 | `quote tx signed for a different chain id` | wrong chain |
-| `stale seq` | seq not above the latest accepted for the uuid |
-| `uuid has been canceled` | canceled uuids are permanently retired — start a new uuid |
+| `stale seq` | seq not above the latest accepted for the uuid (also returned for a duplicate cancel) |
+| `uuid has been canceled` | the uuid is canceled until the cancel's `maxBlockNumber` (§2.4) — continue under a new uuid |
 | `uuid belongs to another maker` | update/cancel of a stream owned by a different account |
 | `the maxBlockNumber must be greater than currentBlockNum` | `maxBlockNumber` was at or below the current block when the update arrived |
-| `quote expired on arrival` | the deadline cannot reach the next block a bundle could land in |
+| `quote expired on arrival` | a new block arrived while the quote was being validated or simulated, and the deadline no longer reaches the next block |
 | `quote gas limit above simulation cap` | tx gas limit over the node's cap |
 | `quote writes storage outside the allowed scope` | write-scope violation |
-| `propamm engine not ready` | node warming up / catching up; retry shortly |
+| `propamm engine not ready` | not synchronized with the chain head (§4); retry shortly |
 | `relayer busy, retry` | simulation concurrency cap reached |
-| *(revert reason / nonce error)* | quote tx failed next-block simulation |
+| *(revert reason / nonce or balance error)* | quote tx failed next-block simulation, including registry rejections such as `NotAuthorized()` or `StaleSeq()` |
 
 ### 2.4 Canceling
 
@@ -124,19 +158,23 @@ Same uuid, higher seq, empty tx:
 { "uuid": "0x1bd6...1c44", "seq": 8, "tx": "0x", "maxBlockNumber": 0 }
 ```
 
-The quote stops being fillable immediately and the uuid is **permanently
-retired** (`uuid has been canceled` thereafter) — continue under a fresh
-uuid. A bundle matched *before* the cancel may still land, bounded by the
-quote's `maxBlockNumber`.
+The quote stops being fillable immediately. The cancel leaves a
+**tombstone** on the uuid until the cancel's own `maxBlockNumber` (with `0`,
+clamped to `head + cap`, about 100 blocks by default): until then every
+update on that uuid, whatever its `seq`, is rejected with
+`uuid has been canceled`, so a delayed pre-cancel update can never revive the
+stream. Continue under a fresh uuid. A bundle matched *before* the cancel may
+still land, bounded by the canceled quote's `maxBlockNumber`.
 
 ### 2.5 Lifecycle
 
 A quote stops being live when any of these happens first:
 
 - **replaced** — same uuid, higher seq;
-- **canceled** — empty-tx update (uuid retired);
+- **canceled** — empty-tx update (uuid tombstoned, §2.4);
 - **expired** — chain passed its `maxBlockNumber`;
-- **aged out** — older than the operator's freshness window (`MaxQuoteAge`);
+- **aged out** — older than the operator's quote-age bound (`maxQuoteAgeMs`
+  in `pamm_status`; `0` = disabled, the reference default);
 - **consumed** — the sender's on-chain nonce advanced past the quote tx;
 - **revoked** — the maker lost console approval (applies at the next
   block after the relayer's snapshot refresh).
@@ -154,30 +192,70 @@ caller's taker key). Simulation methods apply the view automatically:
 
 | Method | Behavior |
 | --- | --- |
-| `eth_call` | executed on chain state at the canonical tip **plus** the caller's overlay; explicit `stateOverride` arguments win over the overlay; historical blocks get plain state |
-| `eth_estimateGas` | same overlay semantics |
+| `eth_call` | executed on chain state at the canonical tip **plus** the caller's overlay; explicit `stateOverride` arguments win over the overlay |
 | `debug_traceCall` | same overlay semantics (complete tip post-state only) |
 
-No PropAMM-specific request shape: call a pool's `IPropAMM.quote` / `swap`
-like any other contract.
+```text
+simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
+```
+
+- The overlay applies only on the canonical head. Historical blocks,
+  non-canonical blocks requested by hash and mid-block traces (`txIndex`) run
+  on plain state.
+- Calls that touch no PropAMM pool return exactly what a plain node returns.
+- While the relayer is not synchronized with the chain head (§4) no overlay
+  is applied.
+
+No PropAMM-specific request shape: call a pool's `IPropAMM.quote` like any
+other contract, or simulate your whole fill transaction.
 
 ### 3.2 `eth_sendRawTransaction`
 
-Submit an ordinary signed transaction. The relayer:
+Submit an ordinary signed transaction. Pools are push-payment
+(`IPropAMM.swap` consumes `tokenIn` already transferred to the pool), so a
+fill is a contract call that pushes and swaps in one transaction — an
+aggregator / router, or the reference `ExamplePammTaker`. The relayer:
 
-1. resolves your view (visible makers + builder routing) from one snapshot;
-2. simulates the tx on your overlay, recording every storage slot read;
-3. attributes each quoted slot read to its freshest visible owning quote;
-4. builds `[quote txs… (oldest first), your tx]`, re-simulates on clean
-   state — quote txs droppable (and physically pruned if dropped), your tx
-   mandatory, nothing revertible;
-5. clamps the bundle to the earliest `maxBlockNumber` among matched quotes
-   and broadcasts to the selected builders in parallel.
+1. checks eligibility: a tx already known to the txpool, a replacement of a
+   pending tx (same sender and nonce, e.g. speed-up or cancel), a blob tx,
+   or one whose gas limit exceeds the simulation cap goes straight to the
+   txpool;
+2. resolves your view (visible makers + builder routing) from one snapshot;
+3. simulates the tx on your overlay, recording every storage slot read
+   (including reads in frames that later revert);
+4. attributes each quoted slot read to its freshest visible owning quote:
+   `quote write-set ∩ taker read-set ≠ ∅ → bundle together`;
+5. builds `[quote txs… (oldest received first), your tx]` and re-simulates on
+   clean state — quote txs droppable (and physically pruned if they fail),
+   your tx mandatory, nothing revertible;
+6. sets the bundle's `maxBlockNumber` to the earliest among the matched
+   quotes and broadcasts to the selected builders in parallel. Builders keep
+   the bundle until that block; the relayer does not rebroadcast or replace
+   it.
 
-Fallback semantics: if the relayer is not ready, nothing was read, the
-simulation fails or no builder accepts, the tx goes to the **normal txpool**
-— never worse than a vanilla node. A nonce-replacement of a pending tx is
-always sent to the txpool so it can displace the original.
+**Fallback.** If the relayer is not synchronized, no quote is visible to you,
+the simulation fails, nothing matches, the matched quotes have expired, every
+quote is dropped in re-simulation, or no builder accepts the bundle, the tx
+goes to the **normal txpool** exactly as on a plain node. A PropAMM fill on
+that path executes without its quote and reverts on chain (the sender pays
+gas; no funds move).
+
+**Visibility.** A bundled tx is private order flow: it is not in the public
+txpool and `eth_getTransactionByHash` returns null until a builder lands it.
+
+**Quote movement.** You are bundled with the quotes live when your tx
+*arrives*, not the snapshot you simulated. Set `minAmountOut` with room for
+that; it is your price protection.
+
+**Wallets.** Send the signed tx to the relayer only, or to the relayer first;
+non-PropAMM transactions are forwarded through the relayer's own txpool, so a
+separate public submission is not needed. Sending the same tx to a public RPC
+in parallel is **not recommended**: if the public copy reaches the relayer's
+txpool first, the tx is "already known" and misses the bundle path.
+
+**Solvers and aggregators** MUST only return PropAMM routes to wallets whose
+signed transactions reach the relayer. A PropAMM-dependent tx sent only to a
+public BSC RPC reverts for lack of its quote update.
 
 ### 3.3 `pamm_getPammStateOverrides`
 
@@ -301,9 +379,15 @@ Levels come in two variants:
   cost of a small approximation error.
 
 Each message is a **complete snapshot**: keep the newest and treat older
-ones as superseded. Within a pair, levels ascend by `amountIn`. Pools of
-makers who restricted their stream appear only when your API key is
-authorized for them — the same visibility rule as everywhere else.
+ones as superseded. Within a pair, levels ascend by `amountIn`; a direction's
+ladder stops at the first size the pool cannot quote. Pairs come from the
+pool's `getPairs()`, so a pair the maker did not register has no ladder.
+
+The ladder is computed once per tick (reference default 200 ms;
+`priceLevels.intervalMs` in `pamm_status`) on the full overlay, and only while someone consumes it: a live
+subscription, or a `pamm_getPammPriceLevels` call within the last 30 seconds.
+A pool is in your ladder only if your view includes **every** maker registered
+on that pool; a pool with no registered maker is visible to everyone.
 
 Two ways to consume, both returning the same shape:
 
@@ -339,7 +423,7 @@ An approved taker picks, in the console, which builders may receive the
 bundles filling its orders (by builder product, e.g. `48club` /
 `blockrazor`, or a specific endpoint name). Empty selection = every builder.
 The choice travels with the taker's `x-api-key`; a selection matching no
-builder configured on a given relayer sends the tx down that relayer's
+builder connected to a given relayer sends the tx down that relayer's
 txpool path instead — the exclusion is honored, never widened.
 
 ---
@@ -358,7 +442,7 @@ txpool path instead — the exclusion is honored, never widened.
   "maxQuoteAgeMs": 120000,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
-    "intervalMs": 1000, "subscribers": 1,
+    "intervalMs": 200, "subscribers": 1,
     "pamms": 1, "levels": 45,
     "computedAt": 1789323649752, "lastComputeMs": 12
   },
@@ -372,10 +456,17 @@ txpool path instead — the exclusion is honored, never widened.
 }
 ```
 
-- `ready` — the node has warmed up on fresh chain heads; while `false`, quote
-  ingest returns `propamm engine not ready` and takers take the vanilla path.
+- `ready` — the relayer is synchronized with the chain (reference rule: five
+  consecutive chain heads, each within 3 seconds of wall-clock time) and
+  falls back to `false` as soon as a head arrives late. While `false`, quote
+  ingest returns `propamm engine not ready`, no overlay is applied and taker
+  transactions take the txpool path.
+- `maxQuoteAgeMs` — the quote-age bound (§2.5); `0` = disabled.
 - `directory` — the console snapshot the relayer authorizes against; `loaded`
-  false or a stale `snapshotAt` means the relayer is failing closed.
+  false or a `snapshotAt` older than `maxAgeMs` means the relayer is failing
+  closed (§1). Absent on a relayer running without a console.
+- `peering` — quote sharing with the operator's other relayers; absent when
+  not configured.
 - `builders` — the configured builder endpoints by name.
 - No key material ever appears in the status.
 
@@ -394,3 +485,8 @@ txpool path instead — the exclusion is honored, never widened.
 - **Atomicity.** Quote txs are ordered oldest-first so the freshest quote is
   the last writer of every contested slot; the taker tx is mandatory; nothing
   in a PropAMM bundle is revertible.
+- **Fallback safety.** Every path that does not end in a bundle ends in the
+  normal txpool, so routing all transactions through the relayer is never
+  worse than using a plain node.
+- **Just-in-time inclusion.** Unmatched quote txs never reach builders or the
+  public txpool; a quote costs gas only when it produces a fill.

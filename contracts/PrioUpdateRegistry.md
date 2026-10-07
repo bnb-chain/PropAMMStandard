@@ -7,7 +7,8 @@ it. The registry stores raw words and enforces exactly two things —
 **authorization** and **write ordering** — everything application-level
 (price layout, freshness, decoding) belongs to the target and its decoder.
 
-Source: [`PrioUpdateRegistry.sol`](./PrioUpdateRegistry.sol).
+Source: [`PrioUpdateRegistry.sol`](./PrioUpdateRegistry.sol). Specification:
+[BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.2.
 
 ## Lanes
 
@@ -84,7 +85,12 @@ to a lane. From then on:
 
 The decoder path is what makes third-party relaying safe: a signed payload
 (`aux`) travels through any submitter, and its validity is decided entirely
-by the maker's own decoder contract.
+by the decoder the target chose. BAP-710 §4.2.3 specifies the reference
+decoder, [`SignedSeqDecoder`](./SignedSeqDecoder.sol): EIP-712
+payloads signed by the target's registered signer (ECDSA or ERC-1271), bound
+to chain, decoder, target and lane, with the same strictly increasing `seq`
+packed into the top 48 bits of slot 0 as the direct path, so pools read both
+kinds of lane identically.
 
 ## Reads
 

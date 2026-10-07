@@ -1,0 +1,16 @@
+# Foundry project for the reference contracts. Sources are the flat .sol files in this directory.
+#   forge install foundry-rs/forge-std vectorized/solady --no-git   (once; lib/ is gitignored)
+#   forge test -vv
+#   forge script script/Deploy.s.sol --rpc-url $RPC --broadcast
+[profile.default]
+src = "."
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+remappings = ["forge-std/=lib/forge-std/src/", "solady/=lib/solady/src/"]
+ignored_warnings_from = ["lib"]

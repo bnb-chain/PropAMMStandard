@@ -3,7 +3,8 @@ const {log} = require("./utils");
 const {WsRpc} = require("./wsrpc");
 
 // stream: subscribe to the relayer's overlay snapshot push
-// (pamm_subscribe / subscribeNewQuotesV1) and print each frame. Needs
+// (pamm_subscribe / subscribeNewQuotesV1) and print each frame raw, exactly
+// as the API returned it (one summary line, then the full JSON). Needs
 // RELAYER_WS with the pamm namespace exposed (--ws --ws.api ...pamm).
 // TAKER_API_KEY, when set, is the caller's view (restricted makers included);
 // without it this is the anonymous public view.
@@ -35,12 +36,9 @@ async function main() {
         log(
             `#${n} block=${frame.blockNumber} ts=${frame.millisTimestamp} accounts=${accounts.length} venues=${venues.length}`
         );
-        for (const v of venues) {
-            const addrs = Object.keys(v.overrides || {});
-            let slots = 0;
-            for (const a of addrs) slots += Object.keys(v.overrides[a] || {}).length;
-            log(`  venue ${v.router}: ${addrs.length} account(s), ${slots} slot(s)`);
-        }
+        // Print the frame exactly as the API returned it: this is the
+        // eth_call-compatible stateDiff a taker would apply on its own node.
+        console.log(JSON.stringify(frame, null, 2));
     });
     log("subscribed", subId);
 
