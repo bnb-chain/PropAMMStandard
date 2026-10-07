@@ -5,7 +5,6 @@ import {IPropAMM} from "./IPropAMM.sol";
 
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
 
@@ -20,12 +19,22 @@ interface IPrioUpdateRegistry {
     function addUpdater(address updater) external;
     function removeUpdater(address updater) external;
     function isUpdater(address target, address updater) external view returns (bool);
+    function setDecoder(uint256 laneIndex, address decoder) external;
+}
+
+/// @dev The one call this contract makes on a SignedSeqDecoder (BAP-710 §4.2.3).
+interface ISignerRegistry {
+    function setSigner(address signer) external;
 }
 
 /// @title ExamplePammRouter
-/// @notice Minimal propAMM whose prices come from the PrioUpdateRegistry. It
-///         implements {IPropAMM} so it can be added to the `PropAMMRouter`
-///         whitelist.
+/// @notice Minimal PropAMM pool whose prices come from the PrioUpdateRegistry.
+///         It implements {IPropAMM}, so wallets, aggregators and solvers price
+///         and fill it like any other pool. (The name is historical: in
+///         BAP-710 terms this contract is the *pool*, the registry *target*
+///         and the "router address" a maker registers in the console; a
+///         "router" in BAP-710 is the contract that pushes `tokenIn` to the
+///         pool and calls `swap`, such as {ExamplePammTaker}.)
 ///
 ///         Registry model (PrioUpdateRegistry, direct updater path):
 ///           - This contract is the `target` in the registry. registry.getState reads the lane keyed by
@@ -48,17 +57,31 @@ interface IPrioUpdateRegistry {
 ///           bits [160, 207]  maxBlockNumber — uint48, inclusive freshness deadline, validated on read
 ///           bits [0, 159]    price          — 1e18-scaled "how much tokenOut 1 tokenIn buys"
 ///
-///         Payment model: pull-payment. `swap` pulls `amountIn` of `tokenIn`
-///         from `msg.sender` with transferFrom — the taker only has to approve
-///         this contract once and a fill is a single atomic transaction (which
-///         is what the relayer bundles) — and pays out `tokenOut` from this
-///         contract's own inventory. Keep the contract funded with `tokenOut`.
+///         Payment model: push-payment, as {IPropAMM.swap} specifies. The caller
+///         transfers `amountIn` of `tokenIn` to this contract BEFORE calling
+///         `swap`; `swap` checks the pushed balance and pays out `tokenOut`
+///         from this contract's own inventory. Inventory is tracked in
+///         `reserves[token]`: whatever the contract holds above its reserve is
+///         what the caller pushed in for the current swap. After a swap both
+///         tokens are re-synced to the actual balances, so any excess pushed
+///         simply joins the inventory.
 ///
-///         Note: this deviates from the push-payment convention documented in
-///         {IPropAMM.swap} (where an outer `PropAMMRouter` transfers `tokenIn`
-///         in before calling). The signatures stay compatible; to sit behind
-///         that outer router, switch the transferFrom back to a pushed-balance
-///         check.
+///         Funding: transfer `tokenOut` to this contract, then call `sync(token)`
+///         so the top-up is booked as inventory. Until it is synced, a top-up is
+///         indistinguishable from a pushed payment and the next `swap` of that
+///         token would consume it as the caller's `amountIn`.
+///
+///         Atomicity: a contract caller (an aggregator router, a solver, or
+///         {ExamplePammTaker}) pushes and swaps in one transaction. A plain EOA
+///         needs two transactions (transfer, then swap); between them the
+///         pushed balance is claimable by anyone who calls `swap` first. The
+///         e2e taker's two-tx fallback does exactly that with test amounts; do
+///         not do it with real size.
+///
+///         Reentrancy: `swap` and `sync` share a transient lock (BAP-710 §8.1).
+///         Without it, a `tokenOut` with a transfer hook could re-enter `swap`
+///         before the payment is booked and spend the same pushed `tokenIn`
+///         twice.
 contract ExamplePammRouter is IPropAMM {
     address public owner;
     IPrioUpdateRegistry public immutable oracle;
@@ -82,20 +105,35 @@ contract ExamplePammRouter is IPropAMM {
     TokenPair[] internal _pairs;
     mapping(bytes32 => bool) internal _pairKnown;
 
+    /// @notice Inventory this contract considers its own, per token. Balance above it is a pushed payment.
+    mapping(address => uint256) public reserves;
+
     error NotOwner();
     error NoPrice();
     error SameToken();
     error PairExists();
     error ZeroAmount();
+    error InsufficientInput(uint256 required, uint256 pushed);
     error InsufficientOutput(uint256 amountOut, uint256 minAmountOut);
     error SwapExpired(uint256 blockNumber, uint256 maxBlockNumber);
     error StaleUpdate();
     error QuoteOverflow();
     error TransferFailed();
+    error Reentrancy();
+
+    /// @dev Held for the duration of `swap` / `sync`; transient, so it costs no storage write.
+    bool private transient _locked;
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked) revert Reentrancy();
+        _locked = true;
+        _;
+        _locked = false;
     }
 
     constructor(address _oracle) {
@@ -120,6 +158,26 @@ contract ExamplePammRouter is IPropAMM {
     /// @notice Check whether a maker is authorized (i.e. registry.isUpdater[router][maker]).
     function isMaker(address maker) external view returns (bool) {
         return oracle.isUpdater(address(this), maker);
+    }
+
+    /*
+     * Signed updates (optional; BAP-710 §4.2.3). Both calls must come from the target itself, hence
+     * these owner-gated wrappers.
+     */
+
+    /// @notice PERMANENTLY binds `decoder` (e.g. SignedSeqDecoder) to the (tokenIn -> tokenOut) lane. From
+    ///         then on that lane takes only relayed `updateStateWithDecoder` writes validated by the decoder;
+    ///         `updateState` from makers reverts DecoderBoundLane. The read path is unchanged, since
+    ///         SignedSeqDecoder stores the same slot-0 layout (seq in the top 48 bits).
+    function bindDecoder(address tokenIn, address tokenOut, address decoder) external onlyOwner {
+        oracle.setDecoder(laneFor(tokenIn, tokenOut), decoder);
+    }
+
+    /// @notice Registers the key (EOA, or ERC-1271 contract) whose EIP-712 signatures `decoder` accepts for
+    ///         every lane of this contract. Zero disables signed updates; a new key invalidates every unlanded
+    ///         payload signed by the old one.
+    function setSigner(address decoder, address signer) external onlyOwner {
+        ISignerRegistry(decoder).setSigner(signer);
     }
 
     /*
@@ -227,31 +285,57 @@ contract ExamplePammRouter is IPropAMM {
         uint256 minAmountOut,
         address recipient,
         uint256 maxBlockNumber
-    ) external override returns (uint256 amountOut) {
+    ) external override nonReentrant returns (uint256 amountOut) {
         if (amountIn == 0) revert ZeroAmount();
-        // Belt-and-braces caller deadline. The lane read below already reverts StaleUpdate() past the
-        // maker's packed deadline, and the Router checks this parameter too, so this can safely be
-        // omitted (see IPropAMM); `maxBlockNumber == 0` skips it.
+        // Caller deadline (BAP-710 §4.3: SHOULD be checked when no router enforces it). The lane read
+        // below independently reverts StaleUpdate() past the maker's packed deadline;
+        // `maxBlockNumber == 0` skips this check.
         if (maxBlockNumber != 0 && block.number > maxBlockNumber) {
             revert SwapExpired(block.number, maxBlockNumber);
         }
 
         amountOut = (amountIn * _price(tokenIn, tokenOut)) / PRICE_SCALE;
 
-        // Pull-payment: take `amountIn` from the caller (one prior approve is
-        // all a taker needs), then pay out `tokenOut` from our own inventory,
-        // measuring what was actually delivered as a balance delta.
-        if (!IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn)) revert TransferFailed();
+        // Push-payment: the caller already transferred `amountIn` of `tokenIn`
+        // here. Whatever we hold above our booked reserve is that payment.
+        uint256 pushed = _pushed(tokenIn);
+        if (pushed < amountIn) revert InsufficientInput(amountIn, pushed);
+
+        // Pay out `tokenOut` from our own inventory, measuring what was actually
+        // delivered as a balance delta.
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(recipient);
         if (!IERC20(tokenOut).transfer(recipient, amountOut)) revert TransferFailed();
         amountOut = IERC20(tokenOut).balanceOf(recipient) - balanceBefore;
         if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
 
+        // Book the payment (and any excess pushed) as inventory; record the payout.
+        _sync(tokenIn);
+        _sync(tokenOut);
+
         emit Swapped(msg.sender, tokenIn, tokenOut, amountIn, amountOut, recipient);
     }
 
-    /// @notice Withdraw inventory. To top up this contract, just transfer `tokenOut` directly to it.
+    /// @notice Books this contract's whole `token` balance as inventory. Call it right after
+    ///         transferring a top-up in; permissionless because it can only raise the reserve
+    ///         to what the contract actually holds.
+    function sync(address token) external nonReentrant {
+        _sync(token);
+    }
+
+    function _sync(address token) internal {
+        reserves[token] = IERC20(token).balanceOf(address(this));
+    }
+
+    /// @dev Balance above the booked reserve: the payment pushed in for the current swap.
+    function _pushed(address token) internal view returns (uint256) {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 reserve = reserves[token];
+        return balance > reserve ? balance - reserve : 0;
+    }
+
+    /// @notice Withdraw inventory. To top up this contract, transfer the token to it and call `sync`.
     function sweep(address token, address to, uint256 amount) external onlyOwner {
         if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
+        _sync(token);
     }
 }

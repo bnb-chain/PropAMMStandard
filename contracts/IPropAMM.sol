@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 /// @title IPropAMM
+/// @notice Standard interface for PropAMM pools (BAP-710 §4.3).
 /// @dev The router uses a push-payment model: before calling `swap` it
 /// transfers `amountIn` of `tokenIn` to the propAMM, then `swap` is expected to
 /// consume that balance.
@@ -12,7 +13,8 @@ interface IPropAMM {
     /// recent swaps.
     /// @param tokenIn The token sold.
     /// @param tokenOut The token bought.
-    /// @param amountIn The exact amount of `tokenIn` pulled from `sender`.
+    /// @param amountIn The exact amount of `tokenIn` that `sender` pushed to the
+    /// propAMM before the call and the swap consumed.
     /// @param amountOut The amount of `tokenOut` delivered to `recipient`,
     /// measured as a balance delta.
     /// @param recipient The address that received `tokenOut`.
@@ -63,16 +65,16 @@ interface IPropAMM {
     /// possible, delivering it to `recipient`.
     /// @dev Expects `amountIn` of `tokenIn` to have ALREADY been transferred to
     /// the propAMM by the caller (push-payment).
-    /// SHALL revert if it cannot deliver at least `minAmountOut` of `tokenOut`
-    /// to `recipient`. The Router makes that check too.
+    /// MUST revert if it cannot deliver at least `minAmountOut` of `tokenOut`
+    /// to `recipient`.
     /// @param tokenIn The address of the token being sold.
     /// @param tokenOut The address of the token being bought.
     /// @param amountIn The exact amount of `tokenIn` to sell.
     /// @param minAmountOut The minimum acceptable amount of `tokenOut`.
     /// @param recipient The address that will receive `tokenOut`.
-    /// @param maxBlockNumber block number after which the swap is no longer valid.
-    /// This value can safely be ignored if coming from the Router, since it
-    /// already does the check.
+    /// @param maxBlockNumber Last block in which the swap is valid (inclusive).
+    /// A propAMM MAY skip this check when its caller (for example a router)
+    /// already enforces it, and SHOULD check it otherwise.
     /// @return amountOut The amount of `tokenOut` received by `recipient`.
     function swap(
         address tokenIn,

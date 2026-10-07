@@ -24,6 +24,12 @@ const cfg = {
     // ===== Deployed contract addresses (see README §2) =====
     ORACLE: process.env.ORACLE || "0x0000000000000000000000000000000000000000",
     ROUTER: process.env.ROUTER || "0x0000000000000000000000000000000000000000",
+    // Optional ExamplePammTaker (contracts/ExamplePammTaker.sol). When set, the
+    // taker fills in ONE tx through it (transferFrom -> pool, then pool.swap)
+    // instead of a separate push tx followed by the swap. The taker EOA must
+    // have approved it for TOKEN_IN, and a pool with a taker allowlist must
+    // allowlist the contract.
+    TAKER_CONTRACT: process.env.TAKER_CONTRACT || "",
 
     // ===== Trading pair =====
     TOKEN_IN: process.env.TOKEN_IN || "0x55d398326f99059fF775485246999027B3197955", // USDT (18d)

@@ -1,6 +1,6 @@
 const ethers = require("ethers");
 const cfg = require("./config");
-const {routerIface, erc20Iface, decodeRevert} = require("./abi");
+const {routerIface, takerIface, erc20Iface, decodeRevert} = require("./abi");
 const {httpRpc, log, sleep} = require("./utils");
 
 // taker: exercises the relayer's whole point — the taker is a PLAIN wallet.
@@ -11,11 +11,18 @@ const {httpRpc, log, sleep} = require("./utils");
 //      is applied server-side, so router.quote returns the maker's live price
 //      with zero extra parameters (a vanilla node reverts NoPrice/StaleUpdate
 //      on the same call; set COMPARE_RPC to print that counterfactual);
-//   2. fill with a standard eth_sendRawTransaction of router.swap — the
-//      relayer simulates it on the overlay, records its SLOAD read-set,
-//      intersects with quote write-sets, and ships an atomic
-//      [quote txs..., swap] bundle to its builders; on any failure path it
-//      falls back to the normal txpool;
+//   2. fill: the router is push-payment (IPropAMM). With TAKER_CONTRACT set
+//      (contracts/ExamplePammTaker.sol) the fill is ONE tx: the contract
+//      transferFroms TOKEN_IN straight into the pool and calls pool.swap, so
+//      nothing ever rests on the pool. Without it, a plain wallet first
+//      transfers amountIn to the router with an ordinary tx (sent to
+//      PUBLIC_RPC, waited to land), then sends router.swap — and between the
+//      two the pushed balance is claimable by anyone who calls swap first
+//      (fine for test amounts, not for real size). Either way the fill tx
+//      goes to the relayer with a standard eth_sendRawTransaction; it
+//      simulates it on the overlay, records its SLOAD read-set, intersects
+//      with quote write-sets, and ships an atomic [quote txs..., fill] bundle
+//      to its builders; on any failure path it falls back to the txpool;
 //   3. watch for landing: while the bundle is with the builders the tx is
 //      invisible (eth_getTransactionByHash returns null, it is NOT in the
 //      pool); it appears when a builder lands the bundle. We poll receipts
@@ -64,9 +71,11 @@ async function simulateQuote(rpc) {
     return BigInt(amountOut.toString());
 }
 
-// One-shot preflight: balance / allowance / router inventory. Warnings only —
-// on a fresh test setup it is easier to see everything at once than to decode
-// on-chain reverts one by one.
+// One-shot preflight on the taker wallet: TOKEN_IN balance, and the allowance
+// to TAKER_CONTRACT when the one-tx path is used. Warnings only. Whether the
+// pool can actually fill is not checked here: the poll loop's eth_call of
+// router.quote through the relayer is that check (it reverts NoPrice /
+// NoQuote when nothing is live).
 async function preflight(taker) {
     const call = async (to, data) => httpRpc(cfg.PUBLIC_RPC, "eth_call", [{to, data}, "latest"]);
     try {
@@ -77,20 +86,14 @@ async function preflight(taker) {
         if (BigInt(bal.toString()) < BigInt(cfg.TAKER_AMOUNT_IN)) {
             log(`WARN: taker TOKEN_IN balance ${bal} < amountIn ${cfg.TAKER_AMOUNT_IN}`);
         }
-        const [allowance] = erc20Iface.decodeFunctionResult(
-            "allowance",
-            await call(cfg.TOKEN_IN, erc20Iface.encodeFunctionData("allowance", [taker, cfg.ROUTER]))
-        );
-        if (BigInt(allowance.toString()) < BigInt(cfg.TAKER_AMOUNT_IN)) {
-            log(`WARN: taker allowance to router ${allowance} < amountIn ${cfg.TAKER_AMOUNT_IN} (approve first)`);
-        }
-        // Pull-payment router: it pays tokenOut from its own balance.
-        const [inv] = erc20Iface.decodeFunctionResult(
-            "balanceOf",
-            await call(cfg.TOKEN_OUT, erc20Iface.encodeFunctionData("balanceOf", [cfg.ROUTER]))
-        );
-        if (BigInt(inv.toString()) === 0n) {
-            log(`WARN: router ${cfg.ROUTER} holds no TOKEN_OUT inventory`);
+        if (cfg.TAKER_CONTRACT) {
+            const [allowance] = erc20Iface.decodeFunctionResult(
+                "allowance",
+                await call(cfg.TOKEN_IN, erc20Iface.encodeFunctionData("allowance", [taker, cfg.TAKER_CONTRACT]))
+            );
+            if (BigInt(allowance.toString()) < BigInt(cfg.TAKER_AMOUNT_IN)) {
+                log(`WARN: taker allowance to TAKER_CONTRACT ${allowance} < amountIn ${cfg.TAKER_AMOUNT_IN} (approve first)`);
+            }
         }
     } catch (e) {
         log(`preflight checks skipped: ${e.message || e}`);
@@ -103,6 +106,30 @@ async function pammStatus() {
     } catch (e) {
         return null;
     }
+}
+
+// Wait for a plain tx sent through PUBLIC_RPC to land; returns its status.
+async function waitReceipt(txHash, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const receipt = await httpRpc(cfg.PUBLIC_RPC, "eth_getTransactionReceipt", [txHash]);
+        if (receipt) return receipt.status === "0x1";
+        if (Date.now() > deadline) throw new Error(`tx ${txHash} not mined within ${timeoutMs}ms`);
+        await sleep(1000);
+    }
+}
+
+async function signTx(wallet, nonce, to, data, gasLimit) {
+    return wallet.signTransaction({
+        chainId: cfg.CHAIN_ID,
+        type: 0,
+        to,
+        value: 0,
+        nonce,
+        gasPrice: ethers.BigNumber.from(cfg.TAKER_GAS_PRICE),
+        gasLimit: ethers.BigNumber.from(gasLimit),
+        data,
+    });
 }
 
 async function sendSwap(wallet, amountOut) {
@@ -119,40 +146,79 @@ async function sendSwap(wallet, amountOut) {
             ? configuredMinOut
             : (amountOut * (10000n - slippageBps)) / 10000n;
 
-    // swap(tokenIn, tokenOut, amountIn, minAmountOut, recipient,
-    // maxBlockNumber): pull-payment, so the taker must hold + have approved
-    // amountIn of tokenIn to the router. maxBlockNumber 0 skips the caller
-    // deadline — the lane read inside already enforces the maker's deadline.
-    const data = routerIface.encodeFunctionData("swap", [
-        cfg.TOKEN_IN,
-        cfg.TOKEN_OUT,
-        cfg.TAKER_AMOUNT_IN,
-        minOut.toString(),
-        wallet.address,
-        0,
-    ]);
+    if (cfg.TAKER_CONTRACT) {
+        // One tx: ExamplePammTaker.swap(pool, ...) pushes and swaps atomically.
+        const raw = await signTx(
+            wallet,
+            nonce,
+            cfg.TAKER_CONTRACT,
+            takerIface.encodeFunctionData("swap", [
+                cfg.ROUTER,
+                cfg.TOKEN_IN,
+                cfg.TOKEN_OUT,
+                cfg.TAKER_AMOUNT_IN,
+                minOut.toString(),
+                wallet.address,
+                0,
+            ]),
+            cfg.TAKER_GAS_LIMIT
+        );
+        const hash = ethers.utils.keccak256(raw);
+        if (cfg.TAKER_DRY_RUN) {
+            log(`[dry-run] NOT sent: taker-contract swap=${hash} nonce=${nonce} amountOut=${amountOut} minOut=${minOut}`);
+            return null;
+        }
+        const returned = await relayerRpc("eth_sendRawTransaction", [raw]);
+        log(`swap sent via ${cfg.TAKER_CONTRACT}: hash=${returned} nonce=${nonce} amountOut=${amountOut} minOut=${minOut}`);
+        return hash;
+    }
 
-    const rawTx = await wallet.signTransaction({
-        chainId: cfg.CHAIN_ID,
-        type: 0,
-        to: cfg.ROUTER,
-        value: 0,
+    // Step 1 (push): TOKEN_IN.transfer(router, amountIn) — an ordinary tx via
+    // PUBLIC_RPC that must land before the swap can consume it.
+    const pushRaw = await signTx(
+        wallet,
         nonce,
-        gasPrice: ethers.BigNumber.from(cfg.TAKER_GAS_PRICE),
-        gasLimit: ethers.BigNumber.from(cfg.TAKER_GAS_LIMIT),
-        data,
-    });
-    const txHash = ethers.utils.keccak256(rawTx);
+        cfg.TOKEN_IN,
+        erc20Iface.encodeFunctionData("transfer", [cfg.ROUTER, cfg.TAKER_AMOUNT_IN]),
+        80000
+    );
+    const pushHash = ethers.utils.keccak256(pushRaw);
+
+    // Step 2 (swap): swap(tokenIn, tokenOut, amountIn, minAmountOut, recipient,
+    // maxBlockNumber). maxBlockNumber 0 skips the caller deadline — the lane
+    // read inside already enforces the maker's deadline.
+    const swapRaw = await signTx(
+        wallet,
+        nonce + 1,
+        cfg.ROUTER,
+        routerIface.encodeFunctionData("swap", [
+            cfg.TOKEN_IN,
+            cfg.TOKEN_OUT,
+            cfg.TAKER_AMOUNT_IN,
+            minOut.toString(),
+            wallet.address,
+            0,
+        ]),
+        cfg.TAKER_GAS_LIMIT
+    );
+    const swapHash = ethers.utils.keccak256(swapRaw);
 
     if (cfg.TAKER_DRY_RUN) {
-        log(`[dry-run] swap NOT sent: hash=${txHash} nonce=${nonce} amountOut=${amountOut} minOut=${minOut}`);
+        log(`[dry-run] NOT sent: push=${pushHash} swap=${swapHash} nonce=${nonce},${nonce + 1} amountOut=${amountOut} minOut=${minOut}`);
         return null;
     }
 
+    await httpRpc(cfg.PUBLIC_RPC, "eth_sendRawTransaction", [pushRaw]);
+    log(`push sent: hash=${pushHash} nonce=${nonce} amountIn=${cfg.TAKER_AMOUNT_IN} -> router, waiting to land...`);
+    if (!(await waitReceipt(pushHash, 90000))) {
+        throw new Error(`push tx ${pushHash} reverted; swap not sent`);
+    }
+    log("push landed");
+
     // A standard raw submission; the relayer does the matching internally.
-    const returned = await relayerRpc("eth_sendRawTransaction", [rawTx]);
-    log(`swap sent: hash=${returned} nonce=${nonce} amountOut=${amountOut} minOut=${minOut}`);
-    return txHash;
+    const returned = await relayerRpc("eth_sendRawTransaction", [swapRaw]);
+    log(`swap sent: hash=${returned} nonce=${nonce + 1} amountOut=${amountOut} minOut=${minOut}`);
+    return swapHash;
 }
 
 // Poll until the tx lands or watchBlocks pass. While the bundle is with the
@@ -169,7 +235,7 @@ async function watchLanding(txHash) {
             const ok = receipt.status === "0x1";
             log(`LANDED block=${parseInt(receipt.blockNumber, 16)} status=${ok ? "success" : "REVERTED"} gasUsed=${parseInt(receipt.gasUsed, 16)}`);
             if (!ok) {
-                log("  reverted on chain: most likely landed via txpool fallback without the quote (NoPrice), or the resting quote ticked past minOut (InsufficientOutput)");
+                log("  reverted on chain: most likely landed via txpool fallback without the quote (NoPrice), the resting quote ticked past minOut (InsufficientOutput), or someone consumed the pushed balance first (InsufficientInput)");
             }
             return ok;
         }
@@ -197,6 +263,7 @@ async function main() {
     log("amountIn      =", cfg.TAKER_AMOUNT_IN);
     log("minOut        =", BigInt(cfg.TAKER_MIN_OUT) > 0n ? cfg.TAKER_MIN_OUT : `sim - ${cfg.TAKER_SLIPPAGE_BPS}bps`);
     log("relayer rpc   =", cfg.RELAYER_RPC);
+    log("fill via      =", cfg.TAKER_CONTRACT ? `${cfg.TAKER_CONTRACT} (one tx)` : "wallet (push tx, then swap tx)");
     log("dryRun        =", cfg.TAKER_DRY_RUN ? "on (no tx sent)" : "off");
     log("taker key     =", cfg.TAKER_API_KEY ? "set" : "none (public makers only)");
 

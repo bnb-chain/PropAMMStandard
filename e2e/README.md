@@ -1,6 +1,9 @@
 # PropAMM Relayer E2E Test
 
-End-to-end test for this repo's unified PropAMM relayer: a maker streams
+> 中文版：[README.zh-CN.md](./README.zh-CN.md)
+
+End-to-end test against a Unified PropAMM Relayer
+([BAP-710](https://github.com/bnb-chain/BEPs/pull/710)): a maker streams
 quotes in over `pamm_sendQuoteUpdateV1`, and the taker is a plain wallet on
 standard JSON-RPC:
 
@@ -10,8 +13,9 @@ maker (updateState quote tx)
                                    └─ merges into the pricing overlay
 taker (plain wallet)
    ├─ eth_call router.quote      ─▶ overlay applied server-side (no stateOverride)
-   └─ eth_sendRawTransaction     ─▶ read/write-set match → [quote txs..., swap]
-        router.swap                  bundle → builders; any failure → txpool
+   └─ eth_sendRawTransaction     ─▶ read/write-set match → [quote txs..., fill]
+        ExamplePammTaker.swap        bundle → builders; any failure → txpool
+        (= transferFrom into the pool + pool.swap, one tx)
 ```
 
 What each side needs:
@@ -22,54 +26,63 @@ What each side needs:
 | quote visibility | per maker setting in the console (public, or ticked takers); optional overlay snapshot stream via `pamm_subscribe` / `subscribeNewQuotesV1` (same view as `eth_call`) |
 | price ladder | `pamm_getPammPriceLevels` / `subscribePriceLevelsV1`: the router's pairs quoted at a range of sizes on the caller's view, no slot decoding needed |
 | taker pricing | plain `eth_call`, optionally with the taker API key in `x-api-key` to also see restricted makers (overlay is server-side; no `stateOverride` / `blockOverride`). Integrators that price off-relayer can apply the stream's `overrides` as `eth_call` `stateDiff`. |
-| taker fill | plain `eth_sendRawTransaction`, same optional header (no bundle submission) |
+| taker fill | plain `eth_sendRawTransaction` of one push-and-swap tx (`ExamplePammTaker.swap`; the pool is push-payment), same optional header (no bundle submission) |
 | ops | `pamm_status`, `pamm_getPammStateOverrides`, `pamm_subscribe` / `subscribeNewQuotesV1` and `subscribePriceLevelsV1` (WS) |
 
-## 1. Node
+## 1. Relayer and API keys
 
-Build and run this repo's geth with the relayer enabled and the `pamm`
-namespace exposed (the relayer never widens the allowlist itself):
-
-```bash
-make geth
-./build/bin/geth --propamm \
-  --propamm.builders "builder-a=https://builder-a.example" \
-  --http --http.api eth,net,web3,pamm \
-  ...
-```
-
-Add `--propamm.console.url https://console.example` and
-`GETH_PROPAMM_CONSOLE_KEY=pamm_relayer_…` to scope makers and takers through
-the PropAMM console; then set `MAKER_API_KEY` / `TAKER_API_KEY` in `.env`
-(API keys issued to approved maker / taker accounts in the console — sent as
+Point `RELAYER_RPC` (and optionally `RELAYER_WS`) at the relayer — the hosted
+one is `https://propamm.bnbchain.org` / `wss://propamm.bnbchain.org`. Get
+`MAKER_API_KEY` / `TAKER_API_KEY` from the console
+([`docs/onboarding.md`](../docs/onboarding.md) Step 0); they are sent as
 `x-api-key`, which the relayer resolves in memory against the console's
-permission snapshot). Without a console, `pamm_sendQuoteUpdateV1` is an
-unauthenticated write method — bind the HTTP/WS endpoint privately. The
-relayer only becomes ready after five consecutive chain heads within 3 s
-(i.e. a synced node); check `npm run status`.
+permission snapshot. Set `PUBLIC_RPC` to an ordinary BSC RPC: a relayer
+deployment may restrict methods other than the PropAMM-relevant ones.
+
+If you run your own relayer instead (the `--propamm` geth fork), expose the
+`pamm` namespace (`--http.api eth,net,web3,pamm`, likewise `--ws.api`) and
+configure builders and, for authenticated makers and takers, the console.
+Without a console, `pamm_sendQuoteUpdateV1` is an unauthenticated write
+method — bind the endpoint privately (BAP-710 §4.4). Either way the relayer
+only becomes ready after five consecutive chain heads within 3 s (i.e. a
+synced node); check `npm run status`.
 
 ## 2. Contracts
 
-The harness drives two example contracts; the sources live in
-`./contracts/` (`PrioUpdateRegistry.sol`, `ExamplePammRouter.sol`) and
-`src/abi.js` lists the methods it relies on:
+The harness drives three example contracts; the sources live in
+`../contracts/` (`PrioUpdateRegistry.sol`, `ExamplePammRouter.sol`,
+`ExamplePammTaker.sol`, see [`contracts/README.md`](../contracts/README.md))
+and `src/abi.js` lists the methods it relies on.
+[`script/Deploy.s.sol`](../contracts/script/Deploy.s.sol) does steps 1–3 and 5:
 
-1. Deploy `PrioUpdateRegistry()` — the raw slot store. It packs a
+1. Use the operator's `PrioUpdateRegistry` (`ORACLE`, on BSC
+   `0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD`, the `.env.example` default; the relayer and the
+   overlay only know quotes that write the registry your pool reads). Deploy
+   your own `PrioUpdateRegistry()` only on a private test setup. It packs a
    strictly-increasing per-lane `seq` into slot 0 and validates nothing else;
-   freshness lives in the router's own lane layout.
-2. Deploy `ExamplePammRouter(registry)` — the settlement contract. It packs
+   freshness lives in the pool's own lane layout.
+2. Deploy `ExamplePammRouter(registry)` — the example pool. It packs
    `(price, maxBlockNumber)` into one lane word and enforces the inclusive
    deadline on read (`StaleUpdate` past it).
 3. Authorize the maker: router owner calls `router.addMaker(MAKER)`; verify
    with `router.isMaker(maker)`.
-4. Top up the router itself with `TOKEN_OUT` inventory (plain transfer; swap
-   pays out of the router's own balance).
+4. Top up the router itself with `TOKEN_OUT` inventory: plain transfer, then
+   call `router.sync(TOKEN_OUT)` so it is booked as inventory (swap pays out
+   of the router's own reserve; an un-synced top-up would be read as a pushed
+   payment by the next swap).
 5. Register the pair for discovery: router owner calls
    `router.addPair(TOKEN_IN, TOKEN_OUT)` (once per pair, either order). The
    relayer's price ladder only quotes pairs `getPairs()` reports; pricing and
    fills work without it.
-6. Taker side: hold `TOKEN_IN` and `TOKEN_IN.approve(router, amount)` — swap
-   is pull-payment, one approve is all a fill needs.
+6. Taker side: hold `TOKEN_IN`. Swap is push-payment (per `IPropAMM`): the
+   pool consumes `amountIn` already transferred to it. Two ways to fill:
+   - **one tx (recommended)**: deploy `ExamplePammTaker` FROM THE TAKER WALLET
+     (no constructor args; only the deployer may call its `swap`),
+     `TOKEN_IN.approve(taker, amount)` from that wallet, set `TAKER_CONTRACT`. Its `swap` transferFroms straight into the
+     pool and calls `pool.swap` atomically. A pool with a taker allowlist
+     must allowlist the taker contract, not the wallet.
+   - **two txs** (`TAKER_CONTRACT` empty): the wallet transfers `amountIn` to
+     the router via `PUBLIC_RPC`, waits, then sends `swap` via the relayer.
 
 The maker account must also hold enough BNB to pass the balance check in the
 relayer's next-block simulation (gas is only really spent when a fill lands
@@ -110,9 +123,14 @@ watches for landing.
   bundle. The watcher logs this state explicitly.
 - **Fallback executes without the quote**: if the relayer is not ready, there
   is no collision, or all builders are down, the tx goes to the public txpool
-  and the swap reverts `NoPrice` on chain (the taker pays gas) — identical to
-  sending it to a vanilla node. The taker gates on `pamm_status`
+  and the swap reverts `NoPrice` / `StaleUpdate` on chain (the taker pays
+  gas) — identical to sending it to a vanilla node. The taker gates on `pamm_status`
   (`ready && overlaySlots > 0`) before sending to keep this rare.
+- **Push-payment**: with `TAKER_CONTRACT` set the fill is one atomic tx and
+  nothing ever rests on the pool. Without it, the e2e pushes `TOKEN_IN` to the
+  router in one tx and swaps in the next; between the two the pushed balance
+  is claimable by anyone who calls `swap` first (the example router is
+  permissionless). Use test amounts on that path.
 - **Slippage is your only price protection**: the relayer bundles the maker's
   latest resting quote, not the frame you simulated, so keep
   `TAKER_SLIPPAGE_BPS` > 0.
