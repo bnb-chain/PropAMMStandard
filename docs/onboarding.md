@@ -17,7 +17,7 @@ maker ── pamm_sendQuoteUpdateV1 (x-api-key) ──▶ relayer
  (signed registry.updateState tx,                │ authorize maker · simulate quote tx
   never broadcast on its own)                    │ capture write-set → per-caller overlay
                                                  ▼
-taker ── eth_call / debug_traceCall ──▶ chain state + overlay ──▶ priced result
+taker ── eth_call ──▶ chain state + overlay ──▶ priced result
   │        (x-api-key optional)
   ▼
 taker ── eth_sendRawTransaction ──▶ match read slots → owning quotes
@@ -307,8 +307,7 @@ integration effort:
 **Option A — simulate with `eth_call` directly against the relayer
 endpoint.** The simplest: point your pricing RPC at the relayer and call
 `IPropAMM.quote` (or simulate your whole fill transaction) exactly like any
-other pool; there is no PropAMM-specific request format. `eth_call` and
-`debug_traceCall` are answered on **chain state plus your quote overlay**
+other pool; there is no PropAMM-specific request format. `eth_call` is answered on **chain state plus your quote overlay**
 (only at the canonical tip; explicit `stateOverride` arguments you pass still
 win over the overlay).
 

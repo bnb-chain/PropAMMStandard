@@ -9,8 +9,8 @@ reference for both sides; the normative specification is
 [BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.4–§4.8.
 
 - Maker: [§2](#2-maker-sending-quotes) — `pamm_sendQuoteUpdateV1`.
-- Taker: [§3](#3-taker-pricing-and-filling) — `eth_call` / `debug_traceCall`
-  / `eth_sendRawTransaction`, plus the overlay and
+- Taker: [§3](#3-taker-pricing-and-filling) — `eth_call` /
+  `eth_sendRawTransaction`, plus the overlay and
   price-level streams.
 - Ops: [§4](#4-operational-introspection) — `pamm_status`.
 
@@ -193,7 +193,6 @@ caller's taker key). Simulation methods apply the view automatically:
 | Method | Behavior |
 | --- | --- |
 | `eth_call` | executed on chain state at the canonical tip **plus** the caller's overlay; explicit `stateOverride` arguments win over the overlay |
-| `debug_traceCall` | same overlay semantics (complete tip post-state only) |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides

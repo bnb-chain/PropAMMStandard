@@ -15,7 +15,7 @@ maker ── pamm_sendQuoteUpdateV1（x-api-key）──▶ relayer
 （签名的 registry.updateState tx,                 │ 鉴权 maker · 模拟报价 tx
   永不单独广播）                                   │ 抓取写集 → 每调用方 overlay
                                                  ▼
-taker ── eth_call / debug_traceCall ──▶ 链上状态 + overlay ──▶ 定价结果
+taker ── eth_call ──▶ 链上状态 + overlay ──▶ 定价结果
   │        （x-api-key 可选）
   ▼
 taker ── eth_sendRawTransaction ──▶ 读槽匹配 → 归属报价
@@ -266,8 +266,8 @@ relayer 知道；拿到报价有三种方式，按接入成本从低到高：
 
 **方式 A：直接对 relayer 端点发 `eth_call` 模拟。** 最简单：把定价
 RPC 指向 relayer，像调任何普通池子一样调 `IPropAMM.quote`（或直接模拟你
-整笔成交交易），没有 PropAMM 专用的请求格式。`eth_call`、`debug_traceCall`
-都在**链上状态加你的报价 overlay** 上作答（只对规范链头生效；你显式传的
+整笔成交交易），没有 PropAMM 专用的请求格式。`eth_call`
+在**链上状态加你的报价 overlay** 上作答（只对规范链头生效；你显式传的
 `stateOverride` 参数仍优先于 overlay）。
 
 **方式 B：从 relayer 订阅 state override，在本地全节点用 `eth_call`

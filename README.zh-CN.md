@@ -58,8 +58,8 @@ e2e/
 
 ## 关键性质
 
-- **Taker 走标准 RPC**——换的是 RPC 端点，不是交易模型。`eth_call`、
-  `debug_traceCall` 在链上状态 *加* 调用方报价 overlay 上作答；`eth_sendRawTransaction` 提交的就是一笔普通签名交易。
+- **Taker 走标准 RPC**——换的是 RPC 端点，不是交易模型。`eth_call`
+  在链上状态 *加* 调用方报价 overlay 上作答；`eth_sendRawTransaction` 提交的就是一笔普通签名交易。
 - **池子 push-payment**——`IPropAMM.swap` 从不对调用方 `transferFrom`；
   成交是在一笔交易里把 `tokenIn` 转进池子并调 `swap`（聚合器，或参考实现
   `ExamplePammTaker`）。不需要对池子授权，池子上也不会残留任何推入余额。
@@ -86,8 +86,7 @@ e2e/
 ## 参考
 
 - [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — 动机、架构与
-  规范。本指南对应修订版
-  [`e7db450`](https://github.com/asiawildboar/BEPs/blob/e7db450ce84501e1f040bb674ae028b83ac7cf08/BAPs/BAP-710.md)。
+  规范。
 - 上游启发：
   [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)
   （注册表）与

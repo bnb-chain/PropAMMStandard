@@ -62,7 +62,7 @@ e2e/
 ## Key properties
 
 - **Standard-RPC taker integration** — change the RPC endpoint, not the
-  transaction model. `eth_call` and `debug_traceCall` are answered on chain
+  transaction model. `eth_call` is answered on chain
   state *plus* the caller's quote overlay;
   `eth_sendRawTransaction` submits an ordinary signed transaction.
 - **Push-payment pools** — `IPropAMM.swap` never `transferFrom`s the caller;
@@ -99,8 +99,7 @@ e2e/
 ## References
 
 - [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — motivation, architecture and
-  specification. This guide tracks revision
-  [`e7db450`](https://github.com/asiawildboar/BEPs/blob/e7db450ce84501e1f040bb674ae028b83ac7cf08/BAPs/BAP-710.md).
+  specification.
 - Upstream inspiration:
   [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)
   (the registry) and

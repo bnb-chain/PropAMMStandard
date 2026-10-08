@@ -8,7 +8,7 @@ Unified PropAMM Relayer 是一个 BNB Chain 全节点，在标准 RPC 之上多�
 [BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.4–§4.8。
 
 - Maker：[§2](#2-maker发送报价)，`pamm_sendQuoteUpdateV1`。
-- Taker：[§3](#3-taker定价与成交)，`eth_call` / `debug_traceCall` /
+- Taker：[§3](#3-taker定价与成交)，`eth_call` /
   `eth_sendRawTransaction`，以及 overlay 与价格档位的
   订阅流。
 - 运维：[§4](#4-运行状态)，`pamm_status`。
@@ -182,7 +182,6 @@ maker 的全部在线报价按槽位取最新值，合并成一份写集，这�
 | 方法 | 行为 |
 | --- | --- |
 | `eth_call` | 在规范链头的链上状态**加上**调用方 overlay 执行。显式传入的 `stateOverride` 优先于 overlay |
-| `debug_traceCall` | 同上（只支持完整的链头后状态） |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
