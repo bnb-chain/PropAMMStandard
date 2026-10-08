@@ -19,7 +19,7 @@ learn a bundle API: they price and fill through standard EVM JSON-RPC.
 
 | Layer | What it is | Where |
 | --- | --- | --- |
-| **PropAMM Oracle** | `PrioUpdateRegistry` — an on-chain registry of maker-published pricing state, organised in per-target *lanes* with replay-protected direct writes and optional decoder-managed lanes | [`contracts/PrioUpdateRegistry.sol`](./contracts/PrioUpdateRegistry.sol) · [model doc](./contracts/PrioUpdateRegistry.md) · [`SignedSeqDecoder.sol`](./contracts/SignedSeqDecoder.sol) · BSC: `0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD` |
+| **PropAMM Oracle** | `PrioUpdateRegistry` — an on-chain registry of maker-published pricing state, organised in per-target *lanes* with replay-protected direct writes and optional decoder-managed lanes | [`contracts/PrioUpdateRegistry.sol`](./contracts/PrioUpdateRegistry.sol) · [model doc](./contracts/PrioUpdateRegistry.md) · [`SignedSeqDecoder.sol`](./contracts/SignedSeqDecoder.sol) · BSC: `0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB` |
 | **PropAMM Pool Interface** | `IPropAMM` — the taker-facing pool surface (`isActive`, `getPairs`, `quote`, `swap`) every integrated pool implements, so wallets, aggregators and solvers need one adapter. `swap` is push-payment: `tokenIn` is transferred to the pool and consumed in the same transaction | [`contracts/IPropAMM.sol`](./contracts/IPropAMM.sol) |
 | **Unified PropAMM Relayer** | A BNB Chain full node fork that authorizes makers, overlays live quotes on chain state for taker simulation, matches taker transactions to the quotes they read, and broadcasts `[quote txs…, taker tx]` bundles to every connected builder | operated infrastructure; API in [`docs/api-guide.md`](./docs/api-guide.md) |
 

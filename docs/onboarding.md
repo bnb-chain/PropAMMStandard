@@ -419,7 +419,7 @@ refresh.
 | Relayer RPC (HTTP) | <https://propamm.bnbchain.org> |
 | Relayer RPC (WS, subscription methods) | `wss://propamm.bnbchain.org` |
 | Console | <https://console.bnbchain.org/> |
-| `PrioUpdateRegistry` (oracle, BSC) | [`0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD`](https://bscscan.com/address/0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD) |
+| `PrioUpdateRegistry` (oracle, BSC) | [`0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`](https://bscscan.com/address/0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB) |
 | Your pool / router | *(you — set it in the console after deploying)* |
 
 ## References

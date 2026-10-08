@@ -17,7 +17,7 @@ Taker 无需学习任何 bundle API：定价和成交都走标准 EVM JSON-RPC�
 
 | 层 | 是什么 | 位置 |
 | --- | --- | --- |
-| **PropAMM Oracle** | `PrioUpdateRegistry`——链上报价状态注册表，按 target 分 *lane* 存储，直写路径带防重放 seq，可选 decoder 托管 lane | [`contracts/PrioUpdateRegistry.sol`](./contracts/PrioUpdateRegistry.sol) · [模型文档](./contracts/PrioUpdateRegistry.md)（英文） · [`SignedSeqDecoder.sol`](./contracts/SignedSeqDecoder.sol) · BSC：`0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD` |
+| **PropAMM Oracle** | `PrioUpdateRegistry`——链上报价状态注册表，按 target 分 *lane* 存储，直写路径带防重放 seq，可选 decoder 托管 lane | [`contracts/PrioUpdateRegistry.sol`](./contracts/PrioUpdateRegistry.sol) · [模型文档](./contracts/PrioUpdateRegistry.md)（英文） · [`SignedSeqDecoder.sol`](./contracts/SignedSeqDecoder.sol) · BSC：`0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB` |
 | **PropAMM Pool 接口** | `IPropAMM`——面向 taker 的统一池子接口（`isActive`、`getPairs`、`quote`、`swap`），钱包、聚合器、solver 只需一个适配器。`swap` 是 push-payment：`tokenIn` 在同一笔交易里先转进池子、再被消费 | [`contracts/IPropAMM.sol`](./contracts/IPropAMM.sol) |
 | **Unified PropAMM Relayer** | BNB Chain 全节点分叉：鉴权 maker、把在线报价叠加到链上状态供 taker 模拟、把 taker 交易与其读到的报价撮合成 `[报价 tx…, taker tx]` bundle、广播到所有接入的 builder | 由运营方部署；API 见 [`docs/api-guide.zh-CN.md`](./docs/api-guide.zh-CN.md) |
 

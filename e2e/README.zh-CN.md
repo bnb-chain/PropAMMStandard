@@ -56,7 +56,7 @@ taker (plain wallet)
 5 步：
 
 1. 使用运营方的 `PrioUpdateRegistry`（`ORACLE`，BSC 上为
-   `0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD`，即 `.env.example` 的
+   `0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`，即 `.env.example` 的
    默认值；relayer 和 overlay 只认写入你池子所读注册表的报价）。只有在私有测试环境里才自己部署
    `PrioUpdateRegistry()`。它把按 lane 严格递增的 `seq` 打包进 slot 0，
    除此之外什么都不校验；保鲜由池子自己的 lane 布局负责。

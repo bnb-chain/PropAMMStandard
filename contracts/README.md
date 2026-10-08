@@ -7,7 +7,7 @@ Interface** (`IPropAMM`, §4.3), and a minimal example pool and taker that
 the [e2e harness](../e2e/) drives against a live relayer.
 
 > **Deployed (BSC mainnet).** `PrioUpdateRegistry`:
-> [`0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD`](https://bscscan.com/address/0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD).
+> [`0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`](https://bscscan.com/address/0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB).
 > Its runtime bytecode matches `PrioUpdateRegistry.sol` here byte for byte
 > apart from the compiler metadata hash.
 
@@ -47,7 +47,7 @@ pool uses a `transient` reentrancy lock (`tstore`), which BSC supports.
 
 ```bash
 cd contracts
-ORACLE=0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD MAKER=<maker EOA> TOKEN_A=<token> TOKEN_B=<token> \
+ORACLE=0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB MAKER=<maker EOA> TOKEN_A=<token> TOKEN_B=<token> \
   forge script script/Deploy.s.sol --rpc-url $RPC --private-key $OWNER_PK --broadcast
 ```
 

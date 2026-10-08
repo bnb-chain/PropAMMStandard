@@ -56,7 +56,7 @@ and `src/abi.js` lists the methods it relies on.
 [`script/Deploy.s.sol`](../contracts/script/Deploy.s.sol) does steps 1–3 and 5:
 
 1. Use the operator's `PrioUpdateRegistry` (`ORACLE`, on BSC
-   `0x4EaBe41ccAEcdbb16b7CE67D893E698757D2C9AD`, the `.env.example` default; the relayer and the
+   `0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`, the `.env.example` default; the relayer and the
    overlay only know quotes that write the registry your pool reads). Deploy
    your own `PrioUpdateRegistry()` only on a private test setup. It packs a
    strictly-increasing per-lane `seq` into slot 0 and validates nothing else;
