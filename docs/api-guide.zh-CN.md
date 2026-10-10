@@ -5,7 +5,7 @@
 Unified PropAMM Relayer 是一个 BNB Chain 全节点，在标准 RPC 之上多了一个
 `pamm_*` JSON-RPC 命名空间（给 maker 和运维用），同时让 taker 常用的几个
 标准 EVM 方法带上 PropAMM 语义。本文是两侧的接口参考；规范性定义见
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.4–§4.8。
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) §4.4–§4.8。
 
 - Maker：[§2](#2-maker发送报价)，`pamm_sendQuoteUpdateV1`。
 - Taker：[§3](#3-taker定价与成交)，`eth_call` /

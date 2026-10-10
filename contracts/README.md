@@ -1,6 +1,6 @@
 # contracts: PropAMM Standard reference contracts
 
-The on-chain half of [BAP-710](https://github.com/bnb-chain/BEPs/pull/710):
+The on-chain half of [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md):
 the **PropAMM Oracle** (`PrioUpdateRegistry`, §4.2) with its reference
 signed-update decoder (`SignedSeqDecoder`, §4.2.3), the **PropAMM Pool
 Interface** (`IPropAMM`, §4.3), and a minimal example pool and taker that

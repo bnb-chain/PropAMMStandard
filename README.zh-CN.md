@@ -4,7 +4,7 @@
 
 BNB Chain 上 **PropAMM** 的链上标准与接入指南——一个 builder 中立的
 专业做市执行层，规范见
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710)。
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md)。
 
 > **Maker 发报价，Taker 发交易，Relayer 组 bundle。**
 
@@ -85,7 +85,7 @@ e2e/
 
 ## 参考
 
-- [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — 动机、架构与
+- [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) — 动机、架构与
   规范。
 - 上游启发：
   [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)

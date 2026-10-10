@@ -6,7 +6,7 @@ The Unified PropAMM Relayer is a BNB Chain full node with one extra JSON-RPC
 namespace (`pamm_*`) for makers and operators, and PropAMM-aware behavior
 behind the standard EVM methods takers already use. This guide is the wire
 reference for both sides; the normative specification is
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.4–§4.8.
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) §4.4–§4.8.
 
 - Maker: [§2](#2-maker-sending-quotes) — `pamm_sendQuoteUpdateV1`.
 - Taker: [§3](#3-taker-pricing-and-filling) — `eth_call` /

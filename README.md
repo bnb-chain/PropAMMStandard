@@ -4,7 +4,7 @@
 
 The on-chain standard and integration guide for **PropAMM** on BNB Chain — a
 builder-neutral execution layer for proprietary AMMs, specified in
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710).
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md).
 
 > **Maker sends quotes. Taker sends transactions. Relayer builds bundles.**
 
@@ -98,7 +98,7 @@ e2e/
 
 ## References
 
-- [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/pull/710) — motivation, architecture and
+- [BAP-710 — Unified PropAMM Relayer](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) — motivation, architecture and
   specification.
 - Upstream inspiration:
   [flashbots/priority-update-registry](https://github.com/flashbots/priority-update-registry)
