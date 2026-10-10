@@ -3,7 +3,7 @@
 > English: [README.md](./README.md)
 
 针对 Unified PropAMM Relayer
-（[BAP-710](https://github.com/bnb-chain/BEPs/pull/710)）的端到端测试：maker
+（[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md)）的端到端测试：maker
 通过 `pamm_sendQuoteUpdateV1` 流式发入报价，taker 是一个走标准 JSON-RPC 的
 普通钱包：
 

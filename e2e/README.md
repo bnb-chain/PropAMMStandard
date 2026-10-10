@@ -3,7 +3,7 @@
 > 中文版：[README.zh-CN.md](./README.zh-CN.md)
 
 End-to-end test against a Unified PropAMM Relayer
-([BAP-710](https://github.com/bnb-chain/BEPs/pull/710)): a maker streams
+([BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md)): a maker streams
 quotes in over `pamm_sendQuoteUpdateV1`, and the taker is a plain wallet on
 standard JSON-RPC:
 

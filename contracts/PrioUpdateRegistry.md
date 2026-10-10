@@ -8,7 +8,7 @@ it. The registry stores raw words and enforces exactly two things —
 (price layout, freshness, decoding) belongs to the target and its decoder.
 
 Source: [`PrioUpdateRegistry.sol`](./PrioUpdateRegistry.sol). Specification:
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710) §4.2.
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) §4.2.
 
 ## Lanes
 

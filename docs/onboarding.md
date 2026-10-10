@@ -36,7 +36,7 @@ trade. Unfilled quotes never cost gas, and any taker transaction the relayer
 cannot bundle continues through the normal txpool.
 
 The normative specification is
-[BAP-710](https://github.com/bnb-chain/BEPs/pull/710); this guide is the
+[BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md); this guide is the
 practical walkthrough.
 
 ---
@@ -431,4 +431,4 @@ refresh.
   decoder-managed lanes, storage layout, errors.
 - [`e2e/README.md`](../e2e/README.md) — runnable maker and taker against a
   live relayer.
-- [BAP-710](https://github.com/bnb-chain/BEPs/pull/710) — specification, architecture and rationale.
+- [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) — specification, architecture and rationale.

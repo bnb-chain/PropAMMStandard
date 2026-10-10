@@ -31,7 +31,7 @@ taker 交易真正*读到*被报价的槽位时，relayer 把归属的报价 tx 
 未被成交的报价不花 gas；relayer 无法组 bundle 的任何 taker 交易都继续走
 普通 txpool。
 
-规范性定义见 [BAP-710](https://github.com/bnb-chain/BEPs/pull/710)；本指南
+规范性定义见 [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md)；本指南
 是实操层面的分步说明。
 
 ---
@@ -377,4 +377,4 @@ Relayer 收到后会做这几件事：
   decoder lane、存储布局与错误（英文）。
 - [`e2e/README.zh-CN.md`](../e2e/README.zh-CN.md) — 对接在线 relayer 的
   可运行 maker 与 taker。
-- [BAP-710](https://github.com/bnb-chain/BEPs/pull/710) — 规范、架构与设计依据。
+- [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md) — 规范、架构与设计依据。
