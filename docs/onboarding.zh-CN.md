@@ -38,7 +38,7 @@ taker 交易真正*读到*被报价的槽位时，relayer 把归属的报价 tx 
 
 ## 第 0 步 — Console 账户、角色与 API Key
 
-全部准入由 **PropAMM console** 管理：<https://console.bnbchain.org/>
+全部准入由 **PropAMM console** 管理：<https://propamm-console.bnbchain.org/>
 
 1. **钱包签名登录**（一次签名，首次登录自动建账户）。
 2. 在 *Roles & Access* **申请角色**（`maker` 或 `taker`），由运营方管理员
@@ -245,7 +245,7 @@ function removeMaker(address maker) external onlyOwner { REGISTRY.removeUpdater(
 
 ### 1. 在 console 获取 taker API Key（可选，但建议）
 
-在 [console](https://console.bnbchain.org/) 登录、申请 `taker` 角色，审批
+在 [console](https://propamm-console.bnbchain.org/) 登录、申请 `taker` 角色，审批
 通过后在 *API Keys* 签发一个 taker Key（`pamm_taker_…`），之后每个
 relayer 请求都放在 `x-api-key` 请求头里。
 
@@ -364,7 +364,7 @@ Relayer 收到后会做这几件事：
 | --- | --- |
 | Relayer RPC（HTTP） | <https://propamm.bnbchain.org> |
 | Relayer RPC（WS，订阅类方法） | `wss://propamm.bnbchain.org` |
-| Console | <https://console.bnbchain.org/> |
+| Console | <https://propamm-console.bnbchain.org/> |
 | `PrioUpdateRegistry`（oracle，BSC） | [`0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`](https://bscscan.com/address/0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB) |
 | 你的池子 / router | *（你自己部署，部署后填进 console）* |
 

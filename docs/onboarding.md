@@ -43,7 +43,7 @@ practical walkthrough.
 
 ## Step 0 — Console account, role and API key
 
-All access is managed by the **PropAMM console**: <https://console.bnbchain.org/>
+All access is managed by the **PropAMM console**: <https://propamm-console.bnbchain.org/>
 
 1. **Sign in** with your wallet (one signature; the account is created on
    first sign-in).
@@ -282,7 +282,7 @@ Full request/response schema and every error string:
 
 ### 1. Get a taker API key from the console (optional, but recommended)
 
-Sign in to the [console](https://console.bnbchain.org/), request the `taker`
+Sign in to the [console](https://propamm-console.bnbchain.org/), request the `taker`
 role, and once it is approved issue a taker key (`pamm_taker_…`) under
 *API Keys*. Send it as the `x-api-key` header on every relayer request.
 
@@ -418,7 +418,7 @@ refresh.
 | --- | --- |
 | Relayer RPC (HTTP) | <https://propamm.bnbchain.org> |
 | Relayer RPC (WS, subscription methods) | `wss://propamm.bnbchain.org` |
-| Console | <https://console.bnbchain.org/> |
+| Console | <https://propamm-console.bnbchain.org/> |
 | `PrioUpdateRegistry` (oracle, BSC) | [`0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB`](https://bscscan.com/address/0x9c2bE1De299346914aB7f466AF9D2F58Cd775BAB) |
 | Your pool / router | *(you — set it in the console after deploying)* |
 
