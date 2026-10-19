@@ -8,8 +8,8 @@ This guide walks a market maker and a taker through onboarding onto a
 - **Maker** — get a maker API key, deploy a pool that reads its price from the
   `PrioUpdateRegistry`, register your pool in the console, and stream signed
   quote update transactions.
-- **Taker** — get a taker API key (optional for public quotes), price through
-  standard EVM RPC against the relayer, and submit ordinary signed
+- **Taker** — get a taker API key (required on every taker-side call), price
+  through standard EVM RPC against the relayer, and submit ordinary signed
   transactions that fill quotes atomically.
 
 ```
@@ -18,7 +18,7 @@ maker ── pamm_sendQuoteUpdateV1 (x-api-key) ──▶ relayer
   never broadcast on its own)                    │ capture write-set → per-caller overlay
                                                  ▼
 taker ── eth_call ──▶ chain state + overlay ──▶ priced result
-  │        (x-api-key optional)
+  │        (x-api-key)
   ▼
 taker ── eth_sendRawTransaction ──▶ match read slots → owning quotes
                                                  │ [quote txs…, taker tx] re-simulated
@@ -32,8 +32,9 @@ storage it writes, and prices takers against that overlay. When a taker
 transaction actually *reads* a quoted slot, the relayer prepends the owning
 quote tx to the taker tx and broadcasts the pair as one atomic bundle — the
 quoted state materializes on chain in the same block, immediately before the
-trade. Unfilled quotes never cost gas, and any taker transaction the relayer
-cannot bundle continues through the normal txpool.
+trade. Unfilled quotes never cost gas. A taker transaction the relayer cannot
+bundle is refused with the reason (an unmatched ERC-20 approve is held
+briefly for your follow-up), never forwarded to the public txpool.
 
 The normative specification is
 [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md); this guide is the
@@ -59,7 +60,7 @@ in the upgrade handshake):
 
 | Header | Who | Purpose |
 | --- | --- | --- |
-| `x-api-key` | maker (required), taker (optional) | Resolved in-memory by the relayer against the console's key table. Quote updates require a **maker** key; a taker key unlocks restricted makers and the taker's builder routing. |
+| `x-api-key` | maker (required), taker (required) | Resolved in-memory by the relayer against the console's key table. Quote updates require a **maker** key; every taker-side call requires a **taker** key, which carries your maker visibility and builder routing. |
 
 The relayer never calls the console on a request path — it refreshes the
 relationship snapshot periodically (about once a minute), so console changes
@@ -164,8 +165,8 @@ In the console's *Maker* workspace:
   can filter by it. A quote from a maker without a registered router still
   prices takers but carries no venue attribution. Attribution comes only from
   the console; a request cannot claim a pool of its own.
-- **Visibility** — `public` (default: every caller, keyed or anonymous, sees
-  your quotes) or `restricted` (only the takers you tick). Ticks apply from
+- **Visibility** — `public` (default: every approved taker sees your
+  quotes) or `restricted` (only the takers you tick). Ticks apply from
   the relayer's next snapshot refresh. Restricted quotes are excluded from
   every other caller's simulation, streams and matching. If you do not want
   your quote state visible to everyone, you MUST restrict it.
@@ -223,8 +224,10 @@ rejects it if it fails:
 - It must **execute successfully** (a revert is returned as the update error).
 - Sign with the EOA's **current on-chain nonce**; since the tx does not land
   on its own, **every update of the stream reuses that nonce**. Once the
-  nonce advances on chain (a fill, or any other tx you send), the live quote
-  is *consumed* and dropped — sign the next update with the new nonce.
+  nonce advances on chain (a fill, or any other tx you send), sign the next
+  update with the new nonce — the stale quote keeps pricing takers until that
+  update replaces it (its dead tx is pruned from bundles at re-simulation),
+  so re-quote promptly after a fill.
 - Keep it a **pure setter**: writes must depend only on calldata. The
   captured write-set is reused as-is until replaced.
 - All quote txs from one EOA share a nonce, so two of your streams can never
@@ -280,20 +283,18 @@ Full request/response schema and every error string:
 
 ## Taker onboarding
 
-### 1. Get a taker API key from the console (optional, but recommended)
+### 1. Get a taker API key from the console (required)
 
 Sign in to the [console](https://propamm-console.bnbchain.org/), request the `taker`
 role, and once it is approved issue a taker key (`pamm_taker_…`) under
 *API Keys*. Send it as the `x-api-key` header on every relayer request.
 
-You can also go without a key: anonymous callers see every **public** maker's
-quotes. A key additionally gives you:
+The key is required on every taker-side call; a missing or bad key gets a
+distinct error. The key decides:
 
-- quotes from the **restricted** makers that ticked your account, and
+- your **view** — every **public** maker's quotes, plus the **restricted**
+  makers that ticked your account, and
 - your **builder routing** choice (see step 4).
-
-An unknown or stale key never breaks a read — it simply degrades to the
-anonymous public view.
 
 ### 2. Get quotes from PropAMM pools
 
@@ -337,9 +338,9 @@ interpolated levels).
 The ladder only covers pairs the pool reports in `getPairs()`, and a pool
 appears only if your view includes every maker registered on it.
 
-All three share the same visibility rules: with a taker key you also see the
-restricted makers that ticked you; otherwise only public quotes. Field
-details: [`api-guide.md`](./api-guide.md) §3.
+All three share the same visibility rules and all three require your taker
+key: the view is the public makers plus the restricted makers that ticked
+you. Field details: [`api-guide.md`](./api-guide.md) §3.
 
 ### 3. Fill on chain
 
@@ -372,17 +373,20 @@ Things to know before you send real size:
 - **`minAmountOut` is your price protection.** You are bundled with the
   quotes live when your tx *arrives*, not the snapshot you simulated, so
   leave room for quote movement.
-- **Fallback.** Anything the relayer cannot bundle (not synchronized, no
-  matching quote, failed re-simulation, no builder accepts, a nonce
-  replacement of a pending tx, …) goes to the normal txpool, exactly as on a
-  plain node. A PropAMM fill there executes without its quote and reverts:
-  you pay gas, no funds move.
+- **Bundled or refused — never pooled.** Anything the relayer cannot bundle
+  (not synchronized, no matching quote, failed re-simulation, no builder
+  accepts, a nonce replacement of a pending tx, …) is refused with the
+  reason; nothing is retained and a resubmit re-runs the pipeline. The one
+  exception: an unmatched ERC-20 **approve** is held briefly and rides with
+  your next transaction as one bundle. The relayer never forwards your tx to
+  the public txpool, where it would execute without its quote and revert.
 - **Private until landed.** A bundled tx is not in the public txpool;
   `eth_getTransactionByHash` returns null until a builder includes it.
-- **Send to the relayer only.** Do not broadcast the same signed tx to a
-  public RPC in parallel: if the public copy reaches the relayer's txpool
-  first, it is "already known" and misses the bundle path. Non-PropAMM
-  transactions sent to the relayer are forwarded through its txpool anyway.
+- **Send PropAMM fills to the relayer only** — and keep non-PropAMM traffic
+  on your ordinary RPC: the relayer refuses a tx that reads no quoted slot.
+  Do not broadcast the same signed tx to a public RPC in parallel: if the
+  public copy reaches the node's txpool first through gossip, the submission
+  is refused as already known and misses the bundle path.
 - **Solvers and aggregators** MUST only return PropAMM routes to wallets
   whose signed transactions reach the relayer; the same tx sent only to a
   public BSC RPC reverts.
@@ -395,16 +399,16 @@ by product in the console's *Taker → Builder Routing* page (e.g. `48club`,
 `blockrazor`).
 
 The ticks are an allowlist: anything unticked is never used. If none of your
-ticked builders is configured on a given relayer, your transaction goes to
-the public txpool there instead. Changes apply at the relayer's next snapshot
-refresh.
+ticked builders is configured on a given relayer, your submission is refused
+there (`no builder available for this taker`). Changes apply at the relayer's
+next snapshot refresh.
 
 ### Taker checklist
 
 | # | Action | Where |
 | --- | --- | --- |
 | 1 | Sign in, request the `taker` role, get it approved | console |
-| 2 | Issue a taker API key (`pamm_taker_…`) | console |
+| 2 | Issue a taker API key (`pamm_taker_…`) and send it as `x-api-key` on every call | console |
 | 3 | To see a restricted maker's quotes, ask them to tick your account in their console | maker's console |
 | 4 | (Optional) tick builders under *Builder Routing* | console |
 | 5 | Get quotes with `x-api-key` (any of the three ways in §2) | you → relayer |

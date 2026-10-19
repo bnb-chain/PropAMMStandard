@@ -30,7 +30,7 @@ One header carries identity:
 | Header | Who | Behavior |
 | --- | --- | --- |
 | `x-api-key` | maker | **Required** for `pamm_sendQuoteUpdateV1`, and must be a console-issued **maker** key. A keyless update is rejected with `missing maker API key (x-api-key header)`, an unknown key with `invalid API key`, and a valid key of the wrong role with `API key is not a maker key`. |
-| `x-api-key` | taker | **Optional** everywhere else. A taker key widens the caller's view with the restricted makers that ticked it and applies the taker's builder routing. An unknown key silently degrades to the anonymous public view — identity never breaks a read. |
+| `x-api-key` | taker | **Required** on every taker-side call (submission, `pamm_` getters and subscriptions) — a missing, unknown or wrong-role key gets a distinct error (first three rows of the table in §3.2). The key decides your view (public makers, plus the restricted makers that ticked you) and your builder routing. |
 
 On WebSocket the header is read once from the upgrade handshake and applies
 to every call on that connection.
@@ -82,8 +82,10 @@ The relayer simulates the tx on the next block before accepting it:
   reason in the response `error`.
 - Sign with the sender's **current on-chain nonce**; every update of the
   stream reuses that nonce (the tx only lands when filled). Once the nonce
-  advances on chain, the live quote is treated as **consumed** and removed;
-  sign the next update with the new nonce.
+  advances on chain (a fill, or any other tx you send), sign the next update
+  with the new nonce: the stale quote keeps pricing takers until that update
+  replaces it, and its dead tx is pruned from any bundle at clean-state
+  re-simulation.
 - Keep it a **pure setter** — storage writes must depend only on calldata.
   The captured write-set is reused as-is until the next update.
 - The sending account must hold enough BNB to pass the next-block
@@ -175,9 +177,12 @@ A quote stops being live when any of these happens first:
 - **expired** — chain passed its `maxBlockNumber`;
 - **aged out** — older than the operator's quote-age bound (`maxQuoteAgeMs`
   in `pamm_status`; `0` = disabled, the reference default);
-- **consumed** — the sender's on-chain nonce advanced past the quote tx;
 - **revoked** — the maker lost console approval (applies at the next
   block after the relayer's snapshot refresh).
+
+A quote whose sender nonce advanced on chain is **not** dropped: it keeps
+pricing takers until your next update replaces it (bundle re-simulation
+prunes the dead tx meanwhile) — so re-quote promptly after a fill.
 
 ---
 
@@ -186,13 +191,16 @@ A quote stops being live when any of these happens first:
 ### 3.1 The overlay
 
 For every caller the relayer maintains a **view**: the merged, per-slot
-freshest write-set of all live quotes from the makers that caller may see
-(public makers for everyone; plus the restricted makers that ticked the
-caller's taker key). Simulation methods apply the view automatically:
+freshest write-set of all live quotes from the makers that caller may see —
+the public makers plus the restricted makers that ticked the caller's taker
+key. The view requires a valid taker key (§1). Simulation methods apply the
+view automatically:
 
 | Method | Behavior |
 | --- | --- |
 | `eth_call` | executed on chain state at the canonical tip **plus** the caller's overlay; explicit `stateOverride` arguments win over the overlay |
+| `eth_estimateGas` | same overlay as `eth_call` |
+| `eth_simulateV1` | the overlay is applied once, to the base state ahead of the first simulated block |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
@@ -215,13 +223,16 @@ Submit an ordinary signed transaction. Pools are push-payment
 fill is a contract call that pushes and swaps in one transaction — an
 aggregator / router, or the reference `ExamplePammTaker`. The relayer:
 
-1. checks eligibility: a tx already known to the txpool, a replacement of a
-   pending tx (same sender and nonce, e.g. speed-up or cancel), a blob tx,
-   or one whose gas limit exceeds the simulation cap goes straight to the
-   txpool;
-2. resolves your view (visible makers + builder routing) from one snapshot;
+1. resolves your identity and view (visible makers + builder routing) from
+   one snapshot — a missing, unknown or non-taker key is refused here (§1);
+2. checks eligibility: a blob tx, one whose gas limit exceeds the simulation
+   cap, a tx already known to the public txpool through gossip, or a
+   replacement of a pending tx (same sender and nonce, e.g. speed-up or
+   cancel) is refused;
 3. simulates the tx on your overlay, recording every storage slot read
-   (including reads in frames that later revert);
+   (including reads in frames that later revert) — a tx exactly one nonce
+   ahead of you is bridged by your held approve (see below), simulated as the
+   unit `[approve, tx]`;
 4. attributes each quoted slot read to its freshest visible owning quote:
    `quote write-set ∩ taker read-set ≠ ∅ → bundle together`;
 5. builds `[quote txs… (oldest received first), your tx]` and re-simulates on
@@ -232,12 +243,37 @@ aggregator / router, or the reference `ExamplePammTaker`. The relayer:
    the bundle until that block; the relayer does not rebroadcast or replace
    it.
 
-**Fallback.** If the relayer is not synchronized, no quote is visible to you,
-the simulation fails, nothing matches, the matched quotes have expired, every
-quote is dropped in re-simulation, or no builder accepts the bundle, the tx
-goes to the **normal txpool** exactly as on a plain node. A PropAMM fill on
-that path executes without its quote and reverts on chain (the sender pays
-gas; no funds move).
+**Bundled or refused — never pooled.** If the relayer is not synchronized,
+no quote is visible to you, the simulation fails, nothing matches, the
+quotes have expired, or no builder accepts the bundle, the tx is **refused**
+with an error naming the failed stage; nothing is retained, and a resubmit
+simply re-runs the pipeline. (If every matched quote tx drops in
+re-simulation, your tx goes to the builders alone.) The relayer never
+forwards a submission to the public txpool: a fill there would execute
+without its quote and revert, costing you gas. One exception: an ERC-20
+**approve** that matches no quote is **held** for a few blocks
+(`takerHoldBlocks` in `pamm_status`) and rides with your next transaction as
+one bundle, or expires; while held it is still never pooled or broadcast. A
+held tx is acknowledged with its hash like any accepted submission.
+
+Refusal errors, as the `eth_sendRawTransaction` error message:
+
+| Error | Stage |
+| --- | --- |
+| `missing taker API key (x-api-key header)` / `invalid API key` / `API key is not an approved taker key` | taker authentication (§1) |
+| `permission directory unavailable, retry later` | no valid console snapshot (fails closed) |
+| `propamm engine not ready` | not synchronized with the chain head (§4) |
+| `blob transactions are not accepted` | blob tx |
+| `gas limit above the simulation cap` | over the node's cap |
+| `relayer busy, retry` | every simulation slot in use |
+| `no live quotes visible to this taker` | empty overlay for your view (an eligible approve is held instead) |
+| `no builder available for this taker` | your builder selection matches none of this relayer's builders |
+| `transaction fails on the quote overlay: …` | your tx reverts even with every visible quote applied |
+| `transaction does not read any quoted slot` | no collision with any visible quote (an eligible approve is held instead) |
+| `transaction nonce is ahead of the sender and the gap is not held on this node` | nonce more than one ahead, or no held approve at your next nonce |
+| `transaction matched no quote and the taker hold is full` | holding is on, but its capacity is exhausted |
+| `transaction is already in the public txpool` / `nonce too low: …` | the public pool (fed by gossip) already holds the tx or its nonce |
+| `transaction matched quotes but could not be delivered to the builders: …` | matched, but the quotes expired, the bundle failed clean-state re-simulation, or no builder accepted it |
 
 **Visibility.** A bundled tx is private order flow: it is not in the public
 txpool and `eth_getTransactionByHash` returns null until a builder lands it.
@@ -246,11 +282,12 @@ txpool and `eth_getTransactionByHash` returns null until a builder lands it.
 *arrives*, not the snapshot you simulated. Set `minAmountOut` with room for
 that; it is your price protection.
 
-**Wallets.** Send the signed tx to the relayer only, or to the relayer first;
-non-PropAMM transactions are forwarded through the relayer's own txpool, so a
-separate public submission is not needed. Sending the same tx to a public RPC
-in parallel is **not recommended**: if the public copy reaches the relayer's
-txpool first, the tx is "already known" and misses the bundle path.
+**Wallets.** Send PropAMM fills to the relayer only, and everything else
+through your ordinary RPC: the relayer refuses a tx that reads no quoted
+slot rather than forwarding it. Sending the same tx to a public RPC in
+parallel is **not recommended**: if the public copy reaches the node's
+txpool first through gossip, the submission is refused as already known and
+misses the bundle path.
 
 **Solvers and aggregators** MUST only return PropAMM routes to wallets whose
 signed transactions reach the relayer. A PropAMM-dependent tx sent only to a
@@ -258,7 +295,10 @@ public BSC RPC reverts for lack of its quote update.
 
 ### 3.3 `pamm_getPammStateOverrides`
 
-One-shot pull of the caller's overlay, `eth_call`-compatible:
+One-shot pull of the caller's overlay, `eth_call`-compatible. An optional
+`params[0]` of `{ "routers": ["0x…"] }` keeps only those venues (and the
+merged `overrides` honors the same filter); omitted or empty = every venue
+you may see:
 
 ```json
 {
@@ -416,14 +456,42 @@ Two ways to consume, both returning the same shape:
 }
 ```
 
+#### Single-size quote helpers
+
+Two convenience methods answer "how much tokenOut for this amountIn" straight
+off the cached ladder. Like `pamm_getPammPriceLevels`, they keep the ladder
+computing, but they never run a simulation of their own:
+
+- `pamm_getPammQuoteVenue(pamm, tokenIn, tokenOut, amountIn)` — the quote on
+  one pool. `source` is `simulated` when `amountIn` sits exactly on a ladder
+  level, `interpolated` when it falls between two (linear); a size outside
+  the quoted range is refused with `amountIn outside the quoted size range`.
+- `pamm_getPammQuote(tokenIn, tokenOut, amountIn)` — the best `amountOut`
+  across every pool in your ladder, with the `pamm` offering it; refused with
+  `no quote for this pair` when nothing in your view covers the pair.
+
+```json
+{
+  "tokenIn": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+  "tokenOut": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "amountIn": "0xa21fe80",
+  "amountOut": "0x18b721a60",
+  "pamm": "0x5979458912f80b96d30d4220af8e2e4925a33320",
+  "source": "interpolated",
+  "blockNumber": 54321099,
+  "millisTimestamp": 1789323649752
+}
+```
+
 ### 3.6 Builder routing
 
 An approved taker picks, in the console, which builders may receive the
 bundles filling its orders (by builder product, e.g. `48club` /
 `blockrazor`, or a specific endpoint name). Empty selection = every builder.
 The choice travels with the taker's `x-api-key`; a selection matching no
-builder connected to a given relayer sends the tx down that relayer's
-txpool path instead — the exclusion is honored, never widened.
+builder connected to a given relayer refuses the submission there
+(`no builder available for this taker`) — the exclusion is honored, never
+widened.
 
 ---
 
@@ -438,6 +506,8 @@ txpool path instead — the exclusion is honored, never widened.
   "quotes": 1, "liveQuotes": 1, "overlaySlots": 1,
   "builders": ["48club", "blockrazor"],
   "pendingBundles": 0,
+  "heldTakerTxs": 0,
+  "takerHoldBlocks": 5,
   "maxQuoteAgeMs": 120000,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
@@ -451,15 +521,17 @@ txpool path instead — the exclusion is honored, never widened.
     "makers": 2, "takers": 2, "keys": 4,
     "refreshIntervalMs": 60000, "maxAgeMs": 600000
   },
-  "peering": { "url": "wss://peer.example", "connected": true, "shared": 41, "received": 0 }
+  "peering": { "url": "redis.internal:6379/0", "channel": "pamm-quotes", "nodeId": "f3a1…", "connected": true, "shared": 41, "received": 0 }
 }
 ```
 
 - `ready` — the relayer is synchronized with the chain (reference rule: five
   consecutive chain heads, each within 3 seconds of wall-clock time) and
   falls back to `false` as soon as a head arrives late. While `false`, quote
-  ingest returns `propamm engine not ready`, no overlay is applied and taker
-  transactions take the txpool path.
+  ingest and taker submissions return `propamm engine not ready` and no
+  overlay is applied.
+- `heldTakerTxs` / `takerHoldBlocks` — unmatched approves currently held, and
+  the hold window in blocks (`0` = holding disabled).
 - `maxQuoteAgeMs` — the quote-age bound (§2.5); `0` = disabled.
 - `directory` — the console snapshot the relayer authorizes against; `loaded`
   false or a `snapshotAt` older than `maxAgeMs` means the relayer is failing
@@ -484,8 +556,9 @@ txpool path instead — the exclusion is honored, never widened.
 - **Atomicity.** Quote txs are ordered oldest-first so the freshest quote is
   the last writer of every contested slot; the taker tx is mandatory; nothing
   in a PropAMM bundle is revertible.
-- **Fallback safety.** Every path that does not end in a bundle ends in the
-  normal txpool, so routing all transactions through the relayer is never
-  worse than using a plain node.
+- **Bundled or refused — never pooled.** A tx priced on quote state must
+  never execute without it, so anything that cannot be bundled is refused
+  with the reason (an unmatched approve is held for a few blocks instead).
+  Keep non-PropAMM traffic on your ordinary RPC.
 - **Just-in-time inclusion.** Unmatched quote txs never reach builders or the
   public txpool; a quote costs gas only when it produces a fill.
