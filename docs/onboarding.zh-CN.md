@@ -7,8 +7,8 @@
 
 - **Maker** — 领取 maker API Key，部署一个从 `PrioUpdateRegistry` 读价的
   池子，在 console 登记池子地址，然后流式发送签名报价更新交易。
-- **Taker** — 领取 taker API Key（只吃公开报价可不带），在 relayer 上用
-  标准 EVM RPC 定价，用普通签名交易原子成交。
+- **Taker** — 领取 taker API Key（每个 taker 侧调用都必须带），在 relayer
+  上用标准 EVM RPC 定价，用普通签名交易原子成交。
 
 ```
 maker ── pamm_sendQuoteUpdateV1（x-api-key）──▶ relayer
@@ -16,7 +16,7 @@ maker ── pamm_sendQuoteUpdateV1（x-api-key）──▶ relayer
   永不单独广播）                                   │ 抓取写集 → 每调用方 overlay
                                                  ▼
 taker ── eth_call ──▶ 链上状态 + overlay ──▶ 定价结果
-  │        （x-api-key 可选）
+  │        （x-api-key）
   ▼
 taker ── eth_sendRawTransaction ──▶ 读槽匹配 → 归属报价
                                                  │ [报价 tx…, taker tx] 干净状态复模拟
@@ -28,8 +28,9 @@ taker ── eth_sendRawTransaction ──▶ 读槽匹配 → 归属报价
 Relayer 模拟一次、抓取它写的存储槽，用这份 overlay 给 taker 定价。当某笔
 taker 交易真正*读到*被报价的槽位时，relayer 把归属的报价 tx 排在 taker tx
 前面，作为一个原子 bundle 广播。报价状态与成交同块落地，紧挨在成交之前。
-未被成交的报价不花 gas；relayer 无法组 bundle 的任何 taker 交易都继续走
-普通 txpool。
+未被成交的报价不花 gas。组不成 bundle 的 taker 交易会被直接拒绝并说明
+原因（未匹配的 ERC-20 approve 会被短暂 hold，等你的后续交易），绝不转发
+进公共 txpool。
 
 规范性定义见 [BAP-710](https://github.com/bnb-chain/BEPs/blob/master/BAPs/BAP-710.md)；本指南
 是实操层面的分步说明。
@@ -52,7 +53,7 @@ taker 交易真正*读到*被报价的槽位时，relayer 把归属的报价 tx 
 
 | 请求头 | 谁 | 用途 |
 | --- | --- | --- |
-| `x-api-key` | maker（必须）、taker（可选） | relayer 在内存中对照 console 的 Key 表解析。报价上行必须是 **maker** Key；taker Key 解锁勾选了你的受限 maker，并携带你的 builder 路由选择。 |
+| `x-api-key` | maker（必须）、taker（必须） | relayer 在内存中对照 console 的 Key 表解析。报价上行必须是 **maker** Key；每个 taker 侧调用都必须带 **taker** Key，它携带你的 maker 可见性和 builder 路由。 |
 
 Relayer 的请求路径从不回源 console。它周期性（约每分钟）刷新关系快照，
 console 上的变更（换 Key、撤角色、勾选可见性）在下一次刷新后生效。
@@ -144,7 +145,7 @@ function removeMaker(address maker) external onlyOwner { REGISTRY.removeUpdater(
   taker 在 overlay 的 `venues[]` 里能看到并按它过滤。没登记 router 的
   maker，报价仍参与定价，但没有 venue 归属。归属只来自 console，请求
   本身不能声明自己的池子。
-- **可见性**：`public`（默认：任何调用方，带不带 Key 都能看到你的报价）
+- **可见性**：`public`（默认：每个获批 taker 都能看到你的报价）
   或 `restricted`（只有你勾选的 taker）。勾选在 relayer 下一次快照刷新后
   生效。受限报价不会进入任何其他调用方的模拟、订阅流和撮合。如果不希望
   你的报价状态对所有人可见，就必须设为受限。
@@ -197,7 +198,8 @@ function removeMaker(address maker) external onlyOwner { REGISTRY.removeUpdater(
 - 必须**执行成功**（revert 原因会在响应的 error 里返回）。
 - 用 EOA 的**当前链上 nonce** 签名；因为 tx 不会单独上链，**这条流的每次
   更新都复用这个 nonce**。一旦链上 nonce 前进（成交了，或你从该账户发了
-  别的交易），在线报价即视为*已消耗*并移除，下一条更新换新 nonce。
+  别的交易），下一条更新换新 nonce——旧报价会继续定价，直到新更新替换它
+  （失效的旧 tx 会在 bundle 重模拟时被剔除），所以成交后请尽快重新报价。
 - 保持**纯 setter**：写入只依赖 calldata。抓取的写集会被原样复用直到被
   替换。
 - 同一 EOA 的所有报价 tx 共享一个 nonce，所以你的两条流不可能在同一个
@@ -243,19 +245,17 @@ function removeMaker(address maker) external onlyOwner { REGISTRY.removeUpdater(
 
 ## Taker 接入
 
-### 1. 在 console 获取 taker API Key（可选，但建议）
+### 1. 在 console 获取 taker API Key（必须）
 
 在 [console](https://propamm-console.bnbchain.org/) 登录、申请 `taker` 角色，审批
 通过后在 *API Keys* 签发一个 taker Key（`pamm_taker_…`），之后每个
 relayer 请求都放在 `x-api-key` 请求头里。
 
-不带 Key 也能用：匿名调用方能看到所有**公开** maker 的报价。带 Key 额外
-带来：
+每个 taker 侧调用都必须带 Key，不带或带错都会报错。Key 决定：
 
-- 勾选了你账户的**受限** maker 的报价，以及
+- 你的**视图**——所有**公开** maker 的报价，加上勾选了你账户的**受限**
+  maker，以及
 - 你的 **builder 路由**选择（见第 4 步）。
-
-未知或失效的 Key 不会打断读取，只是降级为匿名公开视图。
 
 ### 2. 获取 PropAMM Pool 的报价
 
@@ -293,8 +293,9 @@ size 上调过 `quote`，返回按 pAMM 分组的档位表（`amountIn → amoun
 价格梯子只覆盖池子在 `getPairs()` 中报告的交易对，并且只有当你的视图包含
 池子上登记的每个 maker 时，这个池子才会出现。
 
-三种方式共用同一套可见性：带 taker Key 时包含勾选了你的受限 maker，否则
-只有公开报价。字段细节见 [`api-guide.zh-CN.md`](./api-guide.zh-CN.md) §3。
+三种方式共用同一套可见性，也都需要你的 taker Key：视图是公开 maker 加上
+勾选了你的受限 maker。字段细节见
+[`api-guide.zh-CN.md`](./api-guide.zh-CN.md) §3。
 
 ### 3. 成交上链
 
@@ -323,15 +324,18 @@ Relayer 收到后会做这几件事：
 - **`minAmountOut` 是你的价格保护。** 和你一起进 bundle 的是你的交易
   *到达*时的在线报价，而不是你模拟时的那份快照，所以要为报价变动留出
   余量。
-- **回退。** relayer 无法组 bundle 的一切（未同步、没有匹配的报价、重新
-  模拟失败、没有 builder 接受、对 pending 交易的 nonce 替换……）都走普通
-  txpool，与普通节点完全一样。在那里 PropAMM 成交没有报价可用，会
-  revert：你付 gas，资金不动。
+- **要么进 bundle，要么被拒绝——绝不进 txpool。** 组不成 bundle 的情况
+  （未同步、没有匹配的报价、重模拟失败、没有 builder 接受、对 pending
+  交易的 nonce 替换……）一律拒绝并说明是哪一步失败；被拒的交易不被保留，
+  重新提交就重跑一遍。唯一例外：没匹配到报价的 ERC-20 **approve** 会被
+  短暂 hold，和你的下一笔交易一起进 bundle。relayer 从不把你的交易转进
+  公共 txpool——在那里它会因为没有报价而 revert，白付 gas。
 - **落地前保持私有。** 进了 bundle 的交易不在公共 txpool 里；在 builder
   打包它之前，`eth_getTransactionByHash` 返回 null。
-- **只发给 relayer。** 不要把同一笔签名交易同时广播到公共 RPC：如果公共
-  那份先进了 relayer 的 txpool，它就成了「already known」，错过 bundle
-  路径。发给 relayer 的非 PropAMM 交易反正也会经它的 txpool 转发。
+- **PropAMM 成交只发给 relayer**，其余交易继续走你的普通 RPC：没读到任何
+  被报价槽位的交易会被 relayer 拒绝，而不是转发。不要把同一笔签名交易
+  同时广播到公共 RPC：如果公共那份先通过 gossip 进了节点的 txpool，这次
+  提交就会以「already known」被拒绝，错过 bundle 路径。
 - **Solver 与聚合器**必须只把 PropAMM 路由返回给签名交易能到达 relayer
   的钱包；同一笔交易只发到公共 BSC RPC 会 revert。
 
@@ -342,15 +346,16 @@ Relayer 收到后会做这几件事：
 页按品牌勾选（如 `48club`、`blockrazor`）。
 
 勾选是白名单：没勾的一律不发。如果某台 relayer 上一个你勾的 builder 都
-没有，你的交易在那台 relayer 上会直接走公共 txpool。变更在 relayer 下一次
-刷新快照后生效。
+没有，你的提交在那台 relayer 上会被拒绝
+（`no builder available for this taker`）。变更在 relayer 下一次刷新快照后
+生效。
 
 ### Taker 清单
 
 | # | 动作 | 在哪 |
 | --- | --- | --- |
 | 1 | 登录、申请 `taker` 角色、等审批 | console |
-| 2 | 签发 taker API Key（`pamm_taker_…`） | console |
+| 2 | 签发 taker API Key（`pamm_taker_…`），每个调用都放在 `x-api-key` 里 | console |
 | 3 | 需要受限 maker 的报价时，请对方在 console 勾选你的账户 | 对方的 console |
 | 4 | （可选）在 *Builder Routing* 勾选 builder | console |
 | 5 | 带 `x-api-key` 取报价（§2 三种方式任选） | 你 → relayer |

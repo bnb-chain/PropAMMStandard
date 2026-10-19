@@ -75,18 +75,22 @@ e2e/
 - **Builder-neutral** — the relayer fans each bundle out to every connected
   builder; builders stay generic atomic-bundle backends with no
   PropAMM-specific code. Takers may narrow the fanout per account.
-- **Fallback safety** — every transaction the relayer cannot bundle (not
-  synchronized, no quotes, no collision, simulation failure, no builder)
-  continues through the normal txpool. The relayer never behaves worse than
-  a vanilla node.
+- **Bundled or refused, never pooled** — the relayer serves PropAMM takers
+  only: a transaction it cannot bundle (not synchronized, no quotes, no
+  collision, simulation failure, no builder) is refused with the reason,
+  never forwarded to the public txpool — a transaction priced on quote state
+  must never execute without it. The one exception: an unmatched ERC-20
+  approve is held briefly and bundled with the sender's follow-up.
 - **Layered freshness** — each quote carries a deadline enforced by the
   relayer and the builders, an optional operator quote-age bound, and an
   optional pool-side expiry check on read; per-lane `seq` stops older updates
   overwriting newer ones on chain.
 - **Access control at the relayer** — maker and taker API keys are issued by
   the operator's console, role-bound, and verified in memory on every
-  request; makers choose whether their stream is public or restricted to
-  ticked takers.
+  request. Quote updates require a maker key and every taker-side call a
+  taker key;
+  makers choose whether their stream is public or restricted to ticked
+  takers.
 
 ## Security
 

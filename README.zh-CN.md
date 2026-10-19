@@ -67,14 +67,18 @@ e2e/
   只有在成交 bundle 里才上链。没被成交的报价不花 gas。
 - **Builder 中立**——bundle 并行发往所有接入的 builder；builder 只需通用的
   原子 bundle 能力，无 PropAMM 专用代码。Taker 可按账户收窄扇出。
-- **回退安全**——relayer 无法组 bundle 的任何交易（未同步、无报价、无碰撞、
-  模拟失败、无 builder）都继续走普通 txpool，永远不比原生节点差。
+- **要么进 bundle，要么被拒绝，绝不进 txpool**——relayer 只服务 PropAMM
+  taker：组不成 bundle 的交易（未同步、无报价、无碰撞、模拟失败、无
+  builder）直接拒绝并说明原因，绝不转发进公共 txpool——按报价定价的交易
+  不能在没有报价时执行。唯一例外：未匹配的 ERC-20 approve 会被短暂
+  hold，和发送方的下一笔交易一起进 bundle。
 - **分层保鲜**——每条报价带一个由 relayer 和 builder 执行的截止块，另有
   可选的运营方报价时效上限，以及可选的池子读取时过期检查；按 lane 的
   `seq` 防止旧更新在链上覆盖新更新。
 - **鉴权在 relayer 完成**——maker / taker API Key 由运营方 console 签发、
-  绑定角色，relayer 每个请求在内存中校验；maker 自主选择报价流公开或仅对
-  勾选的 taker 可见。
+  绑定角色，relayer 每个请求在内存中校验。报价上行要求 maker Key，每个
+  taker 侧调用要求 taker Key；
+  maker 自主选择报价流公开或仅对勾选的 taker 可见。
 
 ## 安全
 

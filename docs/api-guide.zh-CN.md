@@ -29,7 +29,7 @@ BSC RPC 端点。
 | 请求头 | 谁 | 行为 |
 | --- | --- | --- |
 | `x-api-key` | maker | 调 `pamm_sendQuoteUpdateV1` 时**必须**带，且必须是 console 签发的 **maker** Key。不带 Key 报 `missing maker API key (x-api-key header)`，Key 不认识报 `invalid API key`，角色不对报 `API key is not a maker key`。 |
-| `x-api-key` | taker | 其余接口**可选**。带上 taker Key，视图会多出勾选了你的受限 maker，并按你的 builder 路由设置转发。Key 不认识时静默降级为匿名公开视图，读取永远不会因为身份问题被打断。 |
+| `x-api-key` | taker | 其余 taker 侧调用（提交和 `pamm_` 读取 / 订阅）**必须**带有效的 taker Key——缺失、无效、角色不对各有明确报错（§3.2 错误表前三行）。Key 决定你的视图（公开 maker，加上勾选了你的受限 maker）和 builder 路由。|
 
 WebSocket 上，请求头只在升级握手时读取一次，对该连接上的每个调用生效。
 
@@ -73,8 +73,9 @@ Relayer 会先在下一个块上模拟，通过了才接受：
 
 - 必须**执行成功**，revert 原因会放进响应的 `error` 字段。
 - 用发送方**当前的链上 nonce** 签名。tx 只在成交时才上链，所以这条流的
-  每次更新都复用这个 nonce。链上 nonce 一旦前进，在线报价视为**已消耗**
-  并被移除，下一条更新要换新 nonce。
+  每次更新都复用这个 nonce。链上 nonce 一旦前进（成交，或你发了别的交易），
+  下一条更新要换新 nonce：旧报价会继续给 taker 定价，直到新更新替换它，
+  期间组 bundle 时失效的旧 tx 会在干净状态重模拟中被剔除。
 - 保持**纯 setter**：写入只依赖 calldata。抓到的写集会被原样复用，直到
   下一次更新。
 - 发送账户必须持有足够的 BNB，才能通过下一个块模拟中的余额检查（gas 只在
@@ -165,8 +166,11 @@ JSON-RPC id 对应。
 - **过期**：链越过它的 `maxBlockNumber`；
 - **超龄**：超过运营方的报价时效上限（`pamm_status` 中的
   `maxQuoteAgeMs`；`0` 表示关闭，即参考默认值）；
-- **被消耗**：发送方链上 nonce 越过报价 tx；
 - **被撤权**：maker 失去 console 审批，relayer 快照刷新后的下一个块生效。
+
+发送方链上 nonce 越过报价 tx 时，报价**不会**被移除：它会继续定价，直到
+你的下一条更新替换它（期间失效的旧 tx 由 bundle 重模拟剔除）——所以成交
+后请尽快重新报价。
 
 ---
 
@@ -175,13 +179,15 @@ JSON-RPC id 对应。
 ### 3.1 Overlay
 
 Relayer 为每个调用方维护一个**视图**：先确定这个调用方能看到哪些 maker
-（公开 maker 人人可见，taker Key 再追加勾选了它的受限 maker），再把这些
-maker 的全部在线报价按槽位取最新值，合并成一份写集，这就是 overlay。
-模拟类方法会自动套上它：
+（公开 maker，加上勾选了它的受限 maker），再把这些 maker 的全部在线报价
+按槽位取最新值，合并成一份写集，这就是 overlay。视图需要有效的 taker
+Key（§1）。模拟类方法会自动套上它：
 
 | 方法 | 行为 |
 | --- | --- |
 | `eth_call` | 在规范链头的链上状态**加上**调用方 overlay 执行。显式传入的 `stateOverride` 优先于 overlay |
+| `eth_estimateGas` | 与 `eth_call` 相同的 overlay |
+| `eth_simulateV1` | overlay 只应用一次，加在第一个模拟块之前的基础状态上 |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
@@ -201,12 +207,14 @@ simulated state = chain state at head + overlay(quotes in the caller's view) + c
 进池子的 `tokenIn`），所以成交是一笔在同一交易里「推入 + swap」的合约调用：
 聚合器 / 路由，或参考实现 `ExamplePammTaker`。relayer 依次：
 
-1. 检查资格：txpool 已知的交易、对 pending 交易的替换（同发送方同
-   nonce，如加速或取消）、blob 交易，或 gas limit 超过模拟上限的交易，
-   直接进 txpool；
-2. 从同一份快照解析你的视图（可见 maker 和 builder 路由）；
+1. 从同一份快照解析你的身份和视图（可见 maker 和 builder 路由）——没带
+   Key、Key 不认识或不是 taker Key，在这里直接拒绝（§1）；
+2. 检查资格：blob 交易、gas limit 超过模拟上限、通过 gossip 已进入公共
+   txpool 的交易，或对 pending 交易的替换（同发送方同 nonce，如加速或
+   取消），一律拒绝；
 3. 在你的 overlay 上模拟，记录读到的每个存储槽（包括之后 revert 的调用
-   帧里的读取）；
+   帧里的读取）——恰好比你链上 nonce 大一的交易由你被 hold 的 approve
+   搭桥，按 `[approve, tx]` 作为一个整体模拟（见下）；
 4. 读到的每个被报价槽位，都对应到你可见范围内最新的那条报价：
    `quote write-set ∩ taker read-set ≠ ∅ → bundle together`；
 5. 组装 `[报价 tx…（先收到的在前）, 你的 tx]`，在干净状态上重新模拟。
@@ -216,11 +224,33 @@ simulated state = chain state at head + overlay(quotes in the caller's view) + c
    选中的 builder。builder 会保留这个 bundle 直到该块；relayer 不会重新
    广播或替换它。
 
-**回退。** relayer 未同步、你看不到任何报价、模拟失败、没有匹配、匹配到
-的报价已过期、所有报价在重新模拟中被剔除，或者没有 builder 接受
-bundle，这些情况下交易都走**普通 txpool**，与普通节点完全一样。走这条
-路径的 PropAMM 成交没有报价可用，会在链上 revert（发送方付 gas，资金
-不动）。
+**要么进 bundle，要么被拒绝——绝不进 txpool。** relayer 未同步、看不到
+报价、模拟失败、没有匹配、报价过期、没有 builder 接受，这些情况一律拒
+绝，错误指明是哪一步失败；被拒的交易不被保留，重新提交就重跑一遍。（若
+匹配的报价全部在重模拟中被剔除，你的交易会单独发给 builder。）relayer
+从不把交易转进公共 txpool：在那里成交会因为没有报价而 revert，白付 gas。
+唯一例外：没匹配到报价的 ERC-20 **approve** 会被 **hold** 几个块
+（`pamm_status` 的 `takerHoldBlocks`），等你的下一笔交易一起进 bundle，
+到期作废；hold 期间同样不进池、不广播。被 hold 的交易照常返回交易哈希。
+
+拒绝错误（即 `eth_sendRawTransaction` 的报错信息）：
+
+| 错误 | 环节 |
+| --- | --- |
+| `missing taker API key (x-api-key header)` / `invalid API key` / `API key is not an approved taker key` | taker 鉴权（§1） |
+| `permission directory unavailable, retry later` | 没有有效的 console 快照（fail closed） |
+| `propamm engine not ready` | 未与链头同步（§4） |
+| `blob transactions are not accepted` | blob 交易 |
+| `gas limit above the simulation cap` | 超过节点模拟上限 |
+| `relayer busy, retry` | 模拟并发槽全部占用 |
+| `no live quotes visible to this taker` | 你的视图内没有在线报价（符合条件的 approve 转为 hold） |
+| `no builder available for this taker` | 你选的 builder 在这台 relayer 上一个都没配置 |
+| `transaction fails on the quote overlay: …` | 套上全部可见报价后你的交易仍然 revert |
+| `transaction does not read any quoted slot` | 没读到任何被报价的槽（符合条件的 approve 转为 hold） |
+| `transaction nonce is ahead of the sender and the gap is not held on this node` | nonce 超前不止一位，或你的下一个 nonce 上没有被 hold 的 approve |
+| `transaction matched no quote and the taker hold is full` | hold 已启用但容量耗尽 |
+| `transaction is already in the public txpool` / `nonce too low: …` | 公共池（经 gossip）已持有该交易或其 nonce |
+| `transaction matched quotes but could not be delivered to the builders: …` | 撮合成功，但报价已过期、bundle 干净状态重模拟失败，或没有 builder 接受 |
 
 **可见性。** 进了 bundle 的交易属于私有订单流：不在公共 txpool 里，在
 builder 让它落地之前，`eth_getTransactionByHash` 返回 null。
@@ -229,10 +259,10 @@ builder 让它落地之前，`eth_getTransactionByHash` 返回 null。
 你模拟时的那份快照。设置 `minAmountOut` 时要为此留出余量，它就是你的
 价格保护。
 
-**钱包。** 只把签名交易发给 relayer，或者先发给 relayer；非 PropAMM
-交易会经 relayer 自己的 txpool 转发，所以不需要再单独向公共网络提交。
-**不建议**同时把同一笔交易发给公共 RPC：如果公共那份先进了 relayer 的
-txpool，这笔交易就成了「already known」，错过 bundle 路径。
+**钱包。** 只把 PropAMM 成交发给 relayer，其余交易继续走你的普通 RPC：
+没读到任何被报价槽位的交易会被 relayer 拒绝，而不是转发。**不建议**同时
+把同一笔交易发给公共 RPC：如果公共那份先通过 gossip 进了节点的 txpool，
+这次提交就会以「already known」被拒绝，错过 bundle 路径。
 
 **Solver 与聚合器**必须只把 PropAMM 路由返回给签名交易能到达 relayer 的
 钱包。只发到公共 BSC RPC 的 PropAMM 依赖交易会因为缺少报价更新而
@@ -240,7 +270,9 @@ revert。
 
 ### 3.3 `pamm_getPammStateOverrides`
 
-一次性拉取调用方的 overlay，格式与 `eth_call` 兼容：
+一次性拉取调用方的 overlay，格式与 `eth_call` 兼容。可选的 `params[0]`
+`{ "routers": ["0x…"] }` 只保留列出的 venue（合并后的 `overrides` 遵守同
+一过滤）；不传或为空表示你可见的全部 venue：
 
 ```json
 {
@@ -387,13 +419,40 @@ maker 的池子对所有人可见。
 }
 ```
 
+#### 单一 size 的报价便捷方法
+
+两个便捷方法直接从缓存的梯子上读「这个 amountIn 能换多少 tokenOut」。
+它们和 `pamm_getPammPriceLevels` 一样会让梯子保持计算，但自己绝不发起
+模拟：
+
+- `pamm_getPammQuoteVenue(pamm, tokenIn, tokenOut, amountIn)`：单个池子的
+  报价。`amountIn` 恰好落在梯子档位上时 `source` 为 `simulated`，落在两档
+  之间时线性插值为 `interpolated`；超出报价范围报
+  `amountIn outside the quoted size range`。
+- `pamm_getPammQuote(tokenIn, tokenOut, amountIn)`：你梯子内所有池子中
+  `amountOut` 最大的那个，连同给出它的 `pamm`；视图内没有池子覆盖该交易
+  对时报 `no quote for this pair`。
+
+```json
+{
+  "tokenIn": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+  "tokenOut": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "amountIn": "0xa21fe80",
+  "amountOut": "0x18b721a60",
+  "pamm": "0x5979458912f80b96d30d4220af8e2e4925a33320",
+  "source": "interpolated",
+  "blockNumber": 54321099,
+  "millisTimestamp": 1789323649752
+}
+```
+
 ### 3.6 Builder 路由
 
 获批的 taker 可以在 console 里选择：成交自己订单的 bundle 允许发给哪些
 builder（按品牌，如 `48club` / `blockrazor`，或具体的 endpoint 名）。不选
 表示全部 builder。这个选择跟着 taker 的 `x-api-key` 走。如果某台 relayer
-没有接入任何被选中的 builder，交易在那台上会改走 txpool。排除只会被
-遵守，不会被放宽。
+没有接入任何被选中的 builder，提交在那台上会被拒绝
+（`no builder available for this taker`）。排除只会被遵守，不会被放宽。
 
 ---
 
@@ -408,6 +467,8 @@ builder（按品牌，如 `48club` / `blockrazor`，或具体的 endpoint 名）
   "quotes": 1, "liveQuotes": 1, "overlaySlots": 1,
   "builders": ["48club", "blockrazor"],
   "pendingBundles": 0,
+  "heldTakerTxs": 0,
+  "takerHoldBlocks": 5,
   "maxQuoteAgeMs": 120000,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
@@ -421,14 +482,15 @@ builder（按品牌，如 `48club` / `blockrazor`，或具体的 endpoint 名）
     "makers": 2, "takers": 2, "keys": 4,
     "refreshIntervalMs": 60000, "maxAgeMs": 600000
   },
-  "peering": { "url": "wss://peer.example", "connected": true, "shared": 41, "received": 0 }
+  "peering": { "url": "redis.internal:6379/0", "channel": "pamm-quotes", "nodeId": "f3a1…", "connected": true, "shared": 41, "received": 0 }
 }
 ```
 
 - `ready`：relayer 已与链同步（参考规则：连续五个链头，每个都在墙上时间
-  3 秒以内到达），一旦有链头迟到就退回 `false`。为 `false` 时报价上行会
-  返回 `propamm engine not ready`，不套用 overlay，taker 交易走 txpool
-  路径。
+  3 秒以内到达），一旦有链头迟到就退回 `false`。为 `false` 时报价上行和
+  taker 提交都返回 `propamm engine not ready`，也不套用 overlay。
+- `heldTakerTxs` / `takerHoldBlocks`：当前被 hold 的未匹配 approve 数量，
+  以及 hold 窗口的块数（`0` 表示未启用 hold）。
 - `maxQuoteAgeMs`：报价时效上限（§2.5）；`0` 表示关闭。
 - `directory`：relayer 鉴权所依赖的 console 快照。`loaded` 为 false 或
   `snapshotAt` 比 `maxAgeMs` 更旧，说明 relayer 正处于 fail closed 状态
@@ -445,11 +507,12 @@ builder（按品牌，如 `48club` / `blockrazor`，或具体的 endpoint 名）
   都从每个请求各自的一份快照解析；每个槽位取的是*调用方可见*的最新报价，
   所以隐藏 maker 的新报价永远不会遮住可见 maker 的值，taker 成交时进
   bundle 的就是给它定价的那条报价。
-- **保鲜按块对齐。** 每个新块清理一次过期、超龄、已消耗的报价；请求路径
+- **保鲜按块对齐。** 每个新块清理一次过期、超龄的报价；请求路径
   上不做逐请求的时效检查，因为 bundle 反正落不进当前块。
 - **原子性。** 报价 tx 旧的在前，最新报价是每个争用槽位的最后写者；
   taker tx 必须成功；PropAMM bundle 里没有任何允许 revert 的成分。
-- **回退安全。** 凡是没有以 bundle 结束的路径，都以普通 txpool 结束，所以
-  把全部交易都经 relayer 发送，永远不比用普通节点差。
+- **要么进 bundle，要么被拒绝——绝不进 txpool。** 按报价定价的交易不能在
+  没有报价时执行，所以组不成 bundle 就直接拒绝并说明原因（未匹配的
+  approve 则 hold 几个块）。非 PropAMM 流量请走你的普通 RPC。
 - **即时上链。** 没被撮合的报价 tx 永远不会到达 builder 或公共 txpool；
   报价只有在促成成交时才花 gas。
