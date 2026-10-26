@@ -126,7 +126,7 @@ A rejected one carries the reason:
 ```
 
 `timestamp` is the relayer's receive time (unix millis) — the freshness clock
-used for slot-level conflict resolution and the maker freshness window.
+used for slot-level conflict resolution and for the liveness check (§2.5).
 
 Errors, always in the `error` field (reference implementation):
 
@@ -184,6 +184,15 @@ A quote whose sender nonce advanced on chain is **not** dropped: it keeps
 pricing takers until your next update replaces it (bundle re-simulation
 prunes the dead tx meanwhile) — so re-quote promptly after a fill.
 
+**Keep streaming.** The relayer expects a maker to send continuously. If
+your last accepted update or cancel is older than the liveness window
+(`makerLivenessMs` in `pamm_status`, 450 ms by default), you are *offline*:
+your quotes stay in the pool but price and match nobody until your next
+message, which brings all of them back at once. Any accepted update or cancel
+from your key counts, so one busy stream keeps every quote of yours live. A
+maker that only re-quotes on price changes must still send something several
+times a second.
+
 ---
 
 ## 3. Taker: pricing and filling
@@ -221,14 +230,28 @@ other contract, or simulate your whole fill transaction.
 Submit an ordinary signed transaction. Pools are push-payment
 (`IPropAMM.swap` consumes `tokenIn` already transferred to the pool), so a
 fill is a contract call that pushes and swaps in one transaction — an
-aggregator / router, or the reference `ExamplePammTaker`. The relayer:
+aggregator / router, or the reference `ExamplePammTaker`.
+
+Nothing is bundled on arrival. The relayer runs the cheap checks, returns
+the hash, and matches the tx shortly before the next block is expected
+(150 ms before it by default, `matchLeadTimeMs` in `pamm_status`), once the
+makers have re-quoted after the previous block. Expect up to one block
+interval between the hash and the bundle going out.
+
+On arrival the relayer:
 
 1. resolves your identity and view (visible makers + builder routing) from
    one snapshot — a missing, unknown or non-taker key is refused here (§1);
 2. checks eligibility: a blob tx, one whose gas limit exceeds the simulation
-   cap, a tx already known to the public txpool through gossip, or a
-   replacement of a pending tx (same sender and nonce, e.g. speed-up or
-   cancel) is refused;
+   cap, one over 128 KB or below its intrinsic gas, one with a bad signature,
+   a tx already known to the public txpool through gossip, a replacement of a
+   pending tx (same sender and nonce, e.g. speed-up or cancel), a builder
+   selection matching no builder (§3.6), or a full queue (4096 txs in total,
+   4 per sender) is refused.
+
+Before the next block, one bundle per taker, each sender's txs in nonce
+order, it:
+
 3. simulates the tx on your overlay, recording every storage slot read
    (including reads in frames that later revert) — a tx exactly one nonce
    ahead of you is bridged by your held approve (see below), simulated as the
@@ -237,26 +260,35 @@ aggregator / router, or the reference `ExamplePammTaker`. The relayer:
    `quote write-set ∩ taker read-set ≠ ∅ → bundle together`;
 5. builds `[quote txs… (oldest received first), your tx]` and re-simulates on
    clean state — quote txs droppable (and physically pruned if they fail),
-   your tx mandatory, nothing revertible;
+   your tx mandatory but revertible (see below);
 6. sets the bundle's `maxBlockNumber` to the earliest among the matched
    quotes and broadcasts to the selected builders in parallel. Builders keep
    the bundle until that block; the relayer does not rebroadcast or replace
    it.
 
-**Bundled or refused — never pooled.** If the relayer is not synchronized,
-no quote is visible to you, the simulation fails, nothing matches, the
-quotes have expired, or no builder accepts the bundle, the tx is **refused**
-with an error naming the failed stage; nothing is retained, and a resubmit
-simply re-runs the pipeline. (If every matched quote tx drops in
-re-simulation, your tx goes to the builders alone.) The relayer never
-forwards a submission to the public txpool: a fill there would execute
-without its quote and revert, costing you gas. One exception: an ERC-20
-**approve** that matches no quote is **held** for a few blocks
-(`takerHoldBlocks` in `pamm_status`) and rides with your next transaction as
-one bundle, or expires; while held it is still never pooled or broadcast. A
-held tx is acknowledged with its hash like any accepted submission.
+**Bundled, held or sent alone — never pooled.** Once you have the hash, the
+tx goes out. If there is nothing to bundle it with — no quote visible
+to you, no collision, it fails on the overlay or in the clean-state
+re-simulation, the matched quotes expired — your tx is sent to the builders
+**alone**, with no quote tx and marked revertible, and stays includable for
+as long as a quote would (100 blocks by default). You get a receipt either
+way: a success, or `status: 0x0` if it reverted for lack of a quote. The
+relayer never forwards a submission to the public txpool. One exception to
+sending: an ERC-20 **approve** that matches no quote is **held** for a few
+blocks (`takerHoldBlocks` in `pamm_status`) and rides with your next
+transaction as one bundle, or expires; while held it is never pooled or
+broadcast. A held tx is acknowledged with its hash like any accepted
+submission.
 
-Refusal errors, as the `eth_sendRawTransaction` error message:
+Only two things stop an accepted tx short of the builders, both logged on
+the relayer and neither producing a receipt: a nonce more than one ahead of
+your account with no held approve to bridge it, and no builder accepting the
+bundle. While a tx is queued or being broadcast, a resubmit shares its
+outcome rather than producing a second bundle; a different tx with the same
+sender and nonce replaces a queued one and is refused against one already
+being matched.
+
+Refusals, as the `eth_sendRawTransaction` error message:
 
 | Error | Stage |
 | --- | --- |
@@ -265,26 +297,30 @@ Refusal errors, as the `eth_sendRawTransaction` error message:
 | `propamm engine not ready` | not synchronized with the chain head (§4) |
 | `blob transactions are not accepted` | blob tx |
 | `gas limit above the simulation cap` | over the node's cap |
-| `relayer busy, retry` | every simulation slot in use |
-| `no live quotes visible to this taker` | empty overlay for your view (an eligible approve is held instead) |
+| `transaction too large` / `intrinsic gas too low` / `invalid transaction sender` | over 128 KB, gas limit below the tx's intrinsic gas, or no recoverable sender |
 | `no builder available for this taker` | your builder selection matches none of this relayer's builders |
-| `transaction fails on the quote overlay: …` | your tx reverts even with every visible quote applied |
-| `transaction does not read any quoted slot` | no collision with any visible quote (an eligible approve is held instead) |
-| `transaction nonce is ahead of the sender and the gap is not held on this node` | nonce more than one ahead, or no held approve at your next nonce |
-| `transaction matched no quote and the taker hold is full` | holding is on, but its capacity is exhausted |
 | `transaction is already in the public txpool` / `nonce too low: …` | the public pool (fed by gossip) already holds the tx or its nonce |
-| `transaction matched quotes but could not be delivered to the builders: …` | matched, but the quotes expired, the bundle failed clean-state re-simulation, or no builder accepted it |
+| `too many taker transactions pending the match window` / `too many transactions from this sender pending the match window` | the queue is full (4096 in total, 4 per sender) |
+| `a transaction with this nonce is already being matched` | a different tx at the same sender and nonce is being matched right now |
 
 **Visibility.** A bundled tx is private order flow: it is not in the public
 txpool and `eth_getTransactionByHash` returns null until a builder lands it.
 
-**Quote movement.** You are bundled with the quotes live when your tx
-*arrives*, not the snapshot you simulated. Set `minAmountOut` with room for
+**Quote movement.** You are bundled with the quotes live when the tx is
+matched, just before the block, not the snapshot you simulated. Set `minAmountOut` with room for
 that; it is your price protection.
 
+**A landed receipt may be a revert.** Your tx is listed as revertible in the
+bundle. If state moves between the relayer's re-simulation and block
+building (another fill, a price move), or the relayer could not match it
+with any quote and sent it alone, it lands with `status: 0x0` instead of
+vanishing. Treat it like a revert from a public RPC. Quote txs are never
+allowed to revert. If nothing has landed by the bundle's `maxBlockNumber`
+(no builder included it), resubmit.
+
 **Wallets.** Send PropAMM fills to the relayer only, and everything else
-through your ordinary RPC: the relayer refuses a tx that reads no quoted
-slot rather than forwarding it. Sending the same tx to a public RPC in
+through your ordinary RPC: a tx that reads no quoted slot goes to the
+builders on its own, never to the txpool. Sending the same tx to a public RPC in
 parallel is **not recommended**: if the public copy reaches the node's
 txpool first through gossip, the submission is refused as already known and
 misses the bundle path.
@@ -506,9 +542,12 @@ widened.
   "quotes": 1, "liveQuotes": 1, "overlaySlots": 1,
   "builders": ["48club", "blockrazor"],
   "pendingBundles": 0,
+  "pendingTakerTxs": 0,
+  "matchLeadTimeMs": 150,
   "heldTakerTxs": 0,
   "takerHoldBlocks": 5,
   "maxQuoteAgeMs": 120000,
+  "makerLivenessMs": 450,
   "quoteStreamSubscribers": 0,
   "priceLevels": {
     "intervalMs": 200, "subscribers": 1,
@@ -530,9 +569,13 @@ widened.
   falls back to `false` as soon as a head arrives late. While `false`, quote
   ingest and taker submissions return `propamm engine not ready` and no
   overlay is applied.
+- `pendingTakerTxs` / `matchLeadTimeMs` — taker txs waiting to be matched,
+  and how long before the expected next block matching runs (§3.2).
 - `heldTakerTxs` / `takerHoldBlocks` — unmatched approves currently held, and
   the hold window in blocks (`0` = holding disabled).
 - `maxQuoteAgeMs` — the quote-age bound (§2.5); `0` = disabled.
+- `makerLivenessMs` — the maker liveness window (§2.5); `0` or negative =
+  disabled.
 - `directory` — the console snapshot the relayer authorizes against; `loaded`
   false or a `snapshotAt` older than `maxAgeMs` means the relayer is failing
   closed (§1). Absent on a relayer running without a console.
@@ -550,15 +593,23 @@ widened.
   slot the freshest quote *the caller may see* wins, so a hidden maker's
   fresher quote never shadows a visible maker's value, and a taker is bundled
   with exactly what priced it.
-- **Freshness is block-aligned.** The relayer reaps expired / aged / consumed
-  quotes on every new block; there is no per-request age check because a
-  bundle cannot land before the next block anyway.
+- **Freshness is block-aligned, liveness is not.** The relayer reaps expired
+  and aged quotes on every new block; there is no per-quote age check per
+  request because a bundle cannot land before the next block anyway. The one
+  sub-block check is per maker: a maker quiet for longer than the liveness
+  window is hidden, not reaped, and comes back with its next message (§2.5).
+- **Matching runs just before the block.** A taker tx is matched shortly
+  before the next block, so it meets quotes the makers signed after the
+  previous one (§3.2).
 - **Atomicity.** Quote txs are ordered oldest-first so the freshest quote is
-  the last writer of every contested slot; the taker tx is mandatory; nothing
-  in a PropAMM bundle is revertible.
-- **Bundled or refused — never pooled.** A tx priced on quote state must
-  never execute without it, so anything that cannot be bundled is refused
-  with the reason (an unmatched approve is held for a few blocks instead).
-  Keep non-PropAMM traffic on your ordinary RPC.
+  the last writer of every contested slot; quote txs may be dropped but never
+  revert; the taker tx is never dropped but may land reverted.
+- **Bundled, held or sent alone — never pooled.** A tx that fails the
+  arrival checks is refused with the reason. Everything accepted reaches the
+  builders: bundled with the quotes it read, held for a few blocks (an
+  unmatched approve), or alone and revertible when there is nothing to bundle
+  it with. Nothing goes to the public txpool, and nothing vanishes. Keep
+  non-PropAMM traffic on your ordinary RPC: a tx that reads no quote lands
+  on its own, with no quote behind it.
 - **Just-in-time inclusion.** Unmatched quote txs never reach builders or the
   public txpool; a quote costs gas only when it produces a fill.

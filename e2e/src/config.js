@@ -54,7 +54,8 @@ const cfg = {
     // Example: USDT -> WBNB at 900 USDT/WBNB is 1e18/900 ≈ 1111111111111111.
     QUOTE_PRICE: process.env.QUOTE_PRICE || "1000000000000000000", // 1.0
     QUOTE_JITTER_BPS: Number(process.env.QUOTE_JITTER_BPS || 5),
-    QUOTE_INTERVAL_MS: Number(process.env.QUOTE_INTERVAL_MS || 3000),
+    // Must stay below the relayer's maker liveness window (450 ms default).
+    QUOTE_INTERVAL_MS: Number(process.env.QUOTE_INTERVAL_MS || 200),
     // 0 = head + 100; the relayer clamps to arriveBlock + MaxQuoteLifeBlocks.
     QUOTE_MAX_BLOCK_NUMBER: Number(process.env.QUOTE_MAX_BLOCK_NUMBER || 0),
     MAKER_GAS_LIMIT: Number(process.env.MAKER_GAS_LIMIT || 120000),

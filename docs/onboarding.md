@@ -235,13 +235,19 @@ rejects it if it fails:
   be matched together.
 - When filled, the tx lands on chain and pays its own gas at the price you
   signed.
+- **Keep sending.** A maker whose last accepted update or cancel is older
+  than the relayer's liveness window (450 ms by default, `makerLivenessMs`
+  in `pamm_status`) is offline: its quotes stay in the pool but price and
+  match nobody until its next message. Any update or cancel from your key
+  counts, so one busy stream keeps all of your quotes live. The reference
+  maker sends every 200 ms; do not only re-quote on price changes.
 
 Full request/response schema and every error string:
 [`api-guide.md`](./api-guide.md) §2.
 
 ### 5. Maker protections
 
-- **Freshness protection** — four layers bound the age of any filled quote
+- **Freshness protection** — five layers bound the age of any filled quote
   (BAP-710 §4.7):
   - the **deadline**: your `maxBlockNumber`; the relayer stops using the
     quote after it, and every bundle carrying it expires at the builders by
@@ -250,6 +256,10 @@ Full request/response schema and every error string:
     and, on every new block, drops quotes older than the operator's bound
     regardless of `maxBlockNumber` (`maxQuoteAgeMs` in `pamm_status`; `0`
     means disabled, the reference default — rely on your deadline);
+  - the **liveness window**: once you stop sending for longer than it
+    (450 ms by default), every quote of yours stops pricing and matching
+    until your next message, so a maker that goes down is out of the market
+    within half a second instead of until its deadlines;
   - **pool-side expiry**: your pool's own deadline check on read (step 1),
     which holds even if a stale update is included;
   - **ordering**: a higher `seq` replaces the older quote in the relayer,
@@ -360,30 +370,43 @@ On receipt the relayer:
 
 1. resolves your view from your key: which makers' quotes you can see and
    which builders your bundle may go to;
-2. simulates the transaction on your quote overlay and records which storage
+2. runs the cheap checks (blob, gas cap, size, signature, already in the
+   public pool, queue full) and returns the hash; the transaction is matched
+   shortly before the next block, once makers have re-quoted after the
+   previous one;
+3. simulates the transaction on your quote overlay and records which storage
    slots it reads;
-3. for every quoted slot it read, looks up the freshest owning quote tx;
-4. places those quote txs in front of yours as `[quote txs…, your tx]` and
+4. for every quoted slot it read, looks up the freshest owning quote tx;
+5. places those quote txs in front of yours as `[quote txs…, your tx]` and
    re-simulates the bundle on clean chain state;
-5. if the simulation succeeds, broadcasts the bundle to the connected builders
+6. if the simulation succeeds, broadcasts the bundle to the connected builders
    in parallel.
 
 Things to know before you send real size:
 
 - **`minAmountOut` is your price protection.** You are bundled with the
-  quotes live when your tx *arrives*, not the snapshot you simulated, so
-  leave room for quote movement.
-- **Bundled or refused — never pooled.** Anything the relayer cannot bundle
-  (not synchronized, no matching quote, failed re-simulation, no builder
-  accepts, a nonce replacement of a pending tx, …) is refused with the
-  reason; nothing is retained and a resubmit re-runs the pipeline. The one
-  exception: an unmatched ERC-20 **approve** is held briefly and rides with
-  your next transaction as one bundle. The relayer never forwards your tx to
-  the public txpool, where it would execute without its quote and revert.
+  quotes live when the tx is matched, just before the block, not the
+  snapshot you simulated, so leave room for quote movement.
+- **Bundled, held or sent alone — never pooled.** A tx that fails the
+  arrival checks (not synchronized, bad key, blob, over the gas cap, no
+  builder, a nonce replacement of a pending tx, …) is refused with the
+  reason. Once you have the hash, the tx goes out: bundled with the quotes
+  it read, or, if there is nothing to bundle it with (no quote, no
+  collision, a failed simulation), **alone** and revertible. The relayer
+  never forwards your tx to the public txpool. The one exception to sending:
+  an unmatched ERC-20 **approve** is held briefly and rides with your next
+  transaction as one bundle.
+- **A landed receipt may be a revert.** If state moves between the relayer's
+  re-simulation and block building (another fill, a price move), or your tx
+  went out alone with no quote behind it, it lands with `status: 0x0`
+  instead of vanishing — the same thing a volatile market does to a
+  public-mempool swap. If nothing lands by the bundle's deadline, no builder
+  included it; resubmit.
 - **Private until landed.** A bundled tx is not in the public txpool;
   `eth_getTransactionByHash` returns null until a builder includes it.
 - **Send PropAMM fills to the relayer only** — and keep non-PropAMM traffic
-  on your ordinary RPC: the relayer refuses a tx that reads no quoted slot.
+  on your ordinary RPC: a tx that reads no quoted slot is sent to the
+  builders on its own, with no quote behind it.
   Do not broadcast the same signed tx to a public RPC in parallel: if the
   public copy reaches the node's txpool first through gossip, the submission
   is refused as already known and misses the bundle path.
