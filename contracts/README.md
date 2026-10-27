@@ -109,9 +109,9 @@ transfer hook cannot re-enter and spend the same push twice (BAP-710 §8.1).
 
 `ExamplePammTaker.swap(pool, …)` does the push with `transferFrom` straight
 from its owner into the pool and calls `pool.swap`, all in one transaction.
-On the relayer's fallback path (no quote bundled), the swap reverts
-`NoPrice` / `StaleUpdate` and the push reverts with it, so nothing is left on
-the pool.
+If the swap ever runs without its quote (sent to a public RPC by mistake), it
+reverts `NoPrice` / `StaleUpdate` and the push reverts with it, so nothing is
+left on the pool.
 
 ## Access control
 

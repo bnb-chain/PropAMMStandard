@@ -14,7 +14,8 @@ maker (updateState quote tx)
 taker (plain wallet)
    ├─ eth_call router.quote      ─▶ overlay applied server-side (no stateOverride)
    └─ eth_sendRawTransaction     ─▶ read/write-set match → [quote txs..., fill]
-        ExamplePammTaker.swap        bundle → builders; any failure → txpool
+        ExamplePammTaker.swap        bundle → builders just before the next block;
+                                     no match → sent alone, revertible; never txpool
         (= transferFrom into the pool + pool.swap, one tx)
 ```
 
@@ -118,16 +119,24 @@ taker 每轮轮询打印按 overlay 定价的 `amountOut`（把 `COMPARE_RPC` �
 - **进了 bundle 的交易不可见**：`eth_getTransactionByHash` 返回 null，交易
   也不在 txpool 里；builder 让 bundle 落地后才出现。观察器会明确记录这个
   状态。
-- **回退时没有报价可用**：如果 relayer 未就绪、没有碰撞，或所有 builder
-  都不可用，交易会进公共 txpool，swap 在链上 revert `NoPrice` /
-  `StaleUpdate`（taker 付 gas），与发给原生节点完全一样。taker 发送前会
-  先检查 `pamm_status`（`ready && overlaySlots > 0`），让这种情况尽量少见。
+- **拿到哈希就一定有回执**：relayer 立刻返回哈希，在下一个块之前撮合。
+  找不到可以一起打包的报价，或交易模拟失败，就单独发给 builder、允许 revert，于是 swap 以
+  `NoPrice` revert 落地（taker 付 gas），而不是消失——绝不经过公共 txpool。
+  taker 发送前会先检查 `pamm_status`（`ready && overlaySlots > 0`），让这种
+  情况尽量少见。等满 `TAKER_WATCH_BLOCKS` 仍无回执，说明没有 builder 打包，
+  重新提交。
+- **落地的成交可能是 revert**：taker tx 在 bundle 里允许 revert，所以 relayer
+  重模拟之后、builder 构块之前推入的余额被人拿走了、或报价越过了 `minOut`，
+  交易会以 `status: 0x0` 落地，而不是消失。
 - **Push-payment**：设置了 `TAKER_CONTRACT` 时，成交是一笔原子交易，池子
   上永远不会残留余额。不设时，e2e 先用一笔交易把 `TOKEN_IN` 推给 router，
   下一笔再 swap；两笔之间，推入的余额谁先调 `swap` 谁就能拿走（示例
   router 不设权限）。走这条路径请用测试金额。
-- **滑点是你唯一的价格保护**：relayer 打包的是 maker 最新的在线报价，而不是
-  你模拟的那一帧，所以保持 `TAKER_SLIPPAGE_BPS` > 0。
+- **滑点是你唯一的价格保护**：relayer 打包的是撮合那一刻 maker 最新的
+  报价，而不是你模拟的那一帧，所以保持 `TAKER_SLIPPAGE_BPS` > 0。
+- **maker 必须持续发送**：安静超过 relayer 在线窗口（默认 450ms）的 maker
+  算离线，报价停止定价直到下一条更新。`QUOTE_INTERVAL_MS` 默认 200；调到
+  窗口以上，relayer 上的 `router.quote` 也会开始 revert `NoPrice`。
 - **Maker 复用 nonce 没问题**：报价 tx 只是所抓写集的载体；同一个 nonce
   一直流式复用，直到某次成交把它消耗掉（maker 每一轮都会刷新 pending
   nonce）。`UPDATE_ONCHAIN=1` 会让报价同时经 txpool 发布，这需要提高或

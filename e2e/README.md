@@ -14,7 +14,8 @@ maker (updateState quote tx)
 taker (plain wallet)
    ├─ eth_call router.quote      ─▶ overlay applied server-side (no stateOverride)
    └─ eth_sendRawTransaction     ─▶ read/write-set match → [quote txs..., fill]
-        ExamplePammTaker.swap        bundle → builders; any failure → txpool
+        ExamplePammTaker.swap        bundle → builders just before the next block;
+                                     no match → sent alone, revertible; never txpool
         (= transferFrom into the pool + pool.swap, one tx)
 ```
 
@@ -121,19 +122,31 @@ watches for landing.
 - **While bundled, the tx is invisible**: `eth_getTransactionByHash` returns
   null and it is not in the txpool; it appears when a builder lands the
   bundle. The watcher logs this state explicitly.
-- **Fallback executes without the quote**: if the relayer is not ready, there
-  is no collision, or all builders are down, the tx goes to the public txpool
-  and the swap reverts `NoPrice` / `StaleUpdate` on chain (the taker pays
-  gas) — identical to sending it to a vanilla node. The taker gates on `pamm_status`
-  (`ready && overlaySlots > 0`) before sending to keep this rare.
+- **A hash always ends in a receipt**: the relayer returns the hash at once
+  and matches the tx just before the next block. If there is no quote to
+  bundle it with, or the tx fails in simulation, it is sent to the builders alone and
+  revertible, so the swap lands reverted `NoPrice` (the taker pays gas)
+  rather than disappearing — never through the public txpool. The taker
+  gates on `pamm_status` (`ready && overlaySlots > 0`) before sending to
+  keep that rare. A tx with no receipt after `TAKER_WATCH_BLOCKS` was not
+  included by any builder; resubmit.
+- **A landed fill can be a revert**: the taker tx is revertible inside the
+  bundle, so if the pushed balance was consumed or the quote moved past
+  `minOut` between the relayer's re-simulation and block building, the tx
+  lands with `status: 0x0` instead of vanishing.
 - **Push-payment**: with `TAKER_CONTRACT` set the fill is one atomic tx and
   nothing ever rests on the pool. Without it, the e2e pushes `TOKEN_IN` to the
   router in one tx and swaps in the next; between the two the pushed balance
   is claimable by anyone who calls `swap` first (the example router is
   permissionless). Use test amounts on that path.
 - **Slippage is your only price protection**: the relayer bundles the maker's
-  latest resting quote, not the frame you simulated, so keep
+  latest quote when the tx is matched, not the frame you simulated, so keep
   `TAKER_SLIPPAGE_BPS` > 0.
+- **The maker must keep sending**: a maker quiet for longer than the
+  relayer's liveness window (450 ms by default) is offline and its quotes
+  stop pricing until its next update. `QUOTE_INTERVAL_MS` defaults to 200;
+  raise it past the window and `router.quote` starts reverting `NoPrice` on
+  the relayer too.
 - **Maker nonce reuse works**: the quote tx is a carrier for the captured
   write-set; the same nonce streams until a fill consumes it (the maker
   refreshes the pending nonce every round). `UPDATE_ONCHAIN=1` publishes quotes

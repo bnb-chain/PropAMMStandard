@@ -20,19 +20,23 @@ const {httpRpc, log, sleep} = require("./utils");
 //      two the pushed balance is claimable by anyone who calls swap first
 //      (fine for test amounts, not for real size). Either way the fill tx
 //      goes to the relayer with a standard eth_sendRawTransaction; it
-//      simulates it on the overlay, records its SLOAD read-set, intersects
-//      with quote write-sets, and ships an atomic [quote txs..., fill] bundle
-//      to its builders; on any failure path it falls back to the txpool;
+//      returns the hash, then just before the next block simulates it on the
+//      overlay, records its SLOAD read-set, intersects with quote
+//      write-sets, and ships an atomic
+//      [quote txs..., fill] bundle to its builders; a tx it cannot bundle
+//      with a quote goes to the builders alone and revertible, never to the
+//      txpool;
 //   3. watch for landing: while the bundle is with the builders the tx is
 //      invisible (eth_getTransactionByHash returns null, it is NOT in the
 //      pool); it appears when a builder lands the bundle. We poll receipts
 //      until it lands or TAKER_WATCH_BLOCKS passes.
 //
-// CAUTION (live mode): if the tx falls back to the public txpool (relayer not
-// ready, no collision, all builders down), it executes WITHOUT the quote state
-// and the swap reverts NoPrice on chain — the taker pays that gas. That is the
-// documented fallback behavior (never worse than a vanilla node, which would
-// do exactly the same). Keep TAKER_DRY_RUN=1 until pamm_status looks healthy.
+// CAUTION (live mode): a fill the relayer cannot match with a quote (relayer
+// has no quotes, no collision, simulation failed) is sent to the builders
+// alone and revertible, so it lands as a NoPrice revert and the taker pays
+// that gas — a receipt, never a vanished tx. A matched fill can land reverted
+// too if the quote moved past minOut after the relayer's re-simulation. Keep
+// TAKER_DRY_RUN=1 until pamm_status looks healthy.
 
 function assertConfig() {
     const miss = [];
@@ -235,19 +239,19 @@ async function watchLanding(txHash) {
             const ok = receipt.status === "0x1";
             log(`LANDED block=${parseInt(receipt.blockNumber, 16)} status=${ok ? "success" : "REVERTED"} gasUsed=${parseInt(receipt.gasUsed, 16)}`);
             if (!ok) {
-                log("  reverted on chain: most likely landed via txpool fallback without the quote (NoPrice), the resting quote ticked past minOut (InsufficientOutput), or someone consumed the pushed balance first (InsufficientInput)");
+                log("  reverted on chain: sent alone without a quote (NoPrice), the quote ticked past minOut after the relayer's re-simulation (InsufficientOutput), or someone consumed the pushed balance first (InsufficientInput); the relayer lets the fill land reverted rather than vanish");
             }
             return ok;
         }
         const head = parseInt(await httpRpc(cfg.PUBLIC_RPC, "eth_blockNumber", []), 16);
         const pooled = await httpRpc(cfg.PUBLIC_RPC, "eth_getTransactionByHash", [txHash]);
-        const state = pooled ? "in txpool (fallback path)" : "invisible (bundled with builders, or dropped)";
+        const state = pooled ? "in public txpool (unexpected: the relayer never pools)" : "invisible (waiting to be matched, or with the builders)";
         if (state !== lastSeen) {
             log(`waiting: head=${head} tx ${state}`);
             lastSeen = state;
         }
         if (head - start > cfg.TAKER_WATCH_BLOCKS) {
-            log(`gave up after ${cfg.TAKER_WATCH_BLOCKS} blocks: bundle expired unlanded (or builders dropped it); the relayer prunes it at the quote deadline, after which a resubmit re-runs the pipeline`);
+            log(`gave up after ${cfg.TAKER_WATCH_BLOCKS} blocks: no builder included the bundle before it expired; resubmit`);
             return false;
         }
     }

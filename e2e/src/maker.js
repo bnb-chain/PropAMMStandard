@@ -28,6 +28,9 @@ const {laneFor, packQuote} = require("./lane");
 //     unauthenticated and the node must expose it privately;
 //   - per-update errors come back IN-BAND (resp.error), never as a JSON-RPC
 //     error, so a bad quote does not break the stream;
+//   - the relayer treats a maker quiet for longer than its liveness window
+//     (450 ms by default) as offline and stops pricing its quotes until the
+//     next update, so QUOTE_INTERVAL_MS must stay well below that;
 //   - optional updateOnChain additionally publishes the quote through the
 //     public txpool (needs bumped/rotated nonces to avoid "replacement
 //     underpriced");
@@ -117,7 +120,19 @@ async function main() {
     log("quote uuid    =", uuid);
 
     let seq = 0;
+    let inFlight = false;
     const sendOnce = async () => {
+        // At a 200 ms cadence a slow RPC round can outlast the interval; skip
+        // the tick rather than let two rounds race and arrive out of seq order.
+        if (inFlight) return;
+        inFlight = true;
+        try {
+            await sendRound();
+        } finally {
+            inFlight = false;
+        }
+    };
+    const sendRound = async () => {
         // Strictly increasing and restart-safe: unix millis, bumped by one
         // when two frames land in the same millisecond. Shared by the relayer
         // (per-uuid ordering) and the registry (per-lane StaleSeq guard).
