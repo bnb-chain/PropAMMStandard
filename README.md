@@ -62,16 +62,18 @@ e2e/
 ## Key properties
 
 - **Standard-RPC taker integration** — change the RPC endpoint, not the
-  transaction model. `eth_call`, `eth_estimateGas`, and `eth_simulateV1`
-  use the caller's quote overlay at the canonical tip; with a console
-  configured, all three require a valid taker key before EVM execution,
-  including historical reads and calls without an overlay.
+  transaction model. `eth_call`, `eth_estimateGas`, `eth_simulateV1`, and
+  `debug_traceCall` use the caller's quote overlay at the canonical tip
+  (traces require complete post-state, without `txIndex`). All four require
+  a valid taker key before block lookup or state reconstruction, including
+  historical reads and calls without an overlay.
   `eth_sendRawTransaction` submits an ordinary signed transaction;
   `eth_sendRawTransactionSync` waits for its receipt.
-  HTTP/WS endpoints with `pamm` registered expose a fixed
+  The relayer exposes a fixed
   [18-method ETH allowlist](./docs/api-guide.md#1-connection--authentication),
-  including transaction and receipt lookups; other `eth_*` methods return
-  `-32601`.
+  including transaction and receipt lookups; `debug_traceCall` is the only
+  allowed `debug_*` method.
+  Other `eth_*` / `debug_*` methods return `-32601`.
 - **Push-payment pools** — `IPropAMM.swap` never `transferFrom`s the caller;
   the fill transfers `tokenIn` into the pool and calls `swap` in one
   transaction (an aggregator, or the reference `ExamplePammTaker`). No
@@ -100,9 +102,9 @@ e2e/
 - **Access control at the relayer** — maker and taker API keys are issued by
   the operator's console, role-bound, and verified in memory on every
   request. With a console configured, quote updates require a maker key;
-  taker execution reads, submissions, and `pamm_` reads / subscriptions
-  require a taker key. Common chain / account / transaction / receipt queries
-  remain available without one;
+  taker submissions, `pamm_` reads / subscriptions, and execution reads
+  require a taker key. Common chain / account / transaction / receipt
+  queries remain available without one;
   makers choose whether their stream is public or restricted to ticked
   takers.
 

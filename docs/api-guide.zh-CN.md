@@ -20,8 +20,7 @@ Unified PropAMM Relayer 是一个 BNB Chain 全节点，在标准 RPC 之上多�
 Relayer 同时提供 HTTP 和 WebSocket 两种 JSON-RPC 入口。订阅类方法
 （`pamm_subscribe`）只能走 WebSocket，其余方法两种都可以。
 
-HTTP 或 WebSocket RPC 服务注册了 `pamm` 命名空间时，其 `eth` 命名空间
-仅开放以下 **18 个方法**：
+Relayer 的 `eth` 命名空间仅开放以下 **18 个方法**：
 
 | 分组 | 允许的方法 |
 | --- | --- |
@@ -35,12 +34,15 @@ HTTP 或 WebSocket RPC 服务注册了 `pamm` 命名空间时，其 `eth` 命名
 白名单同样作用于 batch 中的每一项；被禁止的 notification 直接丢弃，
 不执行也不返回响应。
 
+同一端点的 `debug_*` 方法仅允许 `debug_traceCall`，其余均返回 `-32601`。
+上述方法限制适用于单次调用、batch 的每一项和 notification。
+
 身份只靠一个请求头：
 
 | 请求头 | 谁 | 行为 |
 | --- | --- | --- |
 | `x-api-key` | maker | 调 `pamm_sendQuoteUpdateV1` 时**必须**带，且必须是 console 签发的 **maker** Key。不带 Key 报 `missing maker API key (x-api-key header)`，Key 不认识报 `invalid API key`，角色不对报 `API key is not a maker key`。 |
-| `x-api-key` | taker | 其余 taker 侧调用（提交、`pamm_` 读取 / 订阅、`eth_call`、`eth_estimateGas` 和 `eth_simulateV1`）**必须**带有效的 taker Key——缺失、无效、角色不对各有明确报错（§3.2 错误表中的鉴权一行）。Key 决定你的视图（公开 maker，加上勾选了你的受限 maker）和 builder 路由。 |
+| `x-api-key` | taker | 其余 taker 侧调用（提交、`pamm_` 读取 / 订阅，以及执行类读取：`eth_call`、`eth_estimateGas`、`eth_simulateV1`、`debug_traceCall`）**必须**带有效的 taker Key——缺失、无效、角色不对各有明确报错（§3.2 错误表中的鉴权一行）。Key 决定你的视图（公开 maker，加上勾选了你的受限 maker）和 builder 路由。 |
 
 WebSocket 上，请求头只在升级握手时读取一次，对该连接上的每个调用生效。
 
@@ -199,20 +201,21 @@ maker，也必须保证每秒发几条。
 Relayer 为每个调用方维护一个**视图**：先确定这个调用方能看到哪些 maker
 （公开 maker，加上勾选了它的受限 maker），再把这些 maker 的全部在线报价
 按槽位取最新值，合并成一份写集，这就是 overlay。视图需要有效的 taker
-Key（§1）。模拟类方法会自动套上它：
+Key（§1）。以下执行类读取会自动套用该视图：
 
 | 方法 | 行为 |
 | --- | --- |
 | `eth_call` | 在规范链头的链上状态**加上**调用方 overlay 执行。显式传入的 `stateOverride` 优先于 overlay |
 | `eth_estimateGas` | 与 `eth_call` 相同的 overlay |
 | `eth_simulateV1` | overlay 只应用一次，加在第一个模拟块之前的基础状态上 |
+| `debug_traceCall` | 对规范链头的完整块后状态套用调用方 overlay，再应用显式用户状态覆盖；历史块和块内 `txIndex` trace 使用原链上状态 |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
 ```
 
-- 配置 console 时，这三个执行类读取方法均在 EVM 执行前要求有效的
-  taker Key。Key 缺失、无效或角色不符时返回 §3.2 中的鉴权错误，
+- 这四个执行类读取方法均在查询区块或重建状态前要求有效 taker Key；
+  历史块、`txIndex` 请求、没有报价或引擎未就绪时也一样。Key 缺失、无效或角色不符时返回 §3.2 中的鉴权错误，
   未授权调用不会退回普通链上状态继续执行。
 - overlay 只作用于规范链头。通过鉴权后，历史块和按 hash 请求的非规范块
   在原链上状态上执行。

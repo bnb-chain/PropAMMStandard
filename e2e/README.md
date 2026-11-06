@@ -37,17 +37,21 @@ one is `https://propamm.bnbchain.org` / `wss://propamm.bnbchain.org`. Get
 `MAKER_API_KEY` / `TAKER_API_KEY` from the console
 ([`docs/onboarding.md`](../docs/onboarding.md) Step 0); they are sent as
 `x-api-key`, which the relayer resolves in memory against the console's
-permission snapshot. With a console configured, `eth_call`, `eth_estimateGas`,
-and `eth_simulateV1` reject unauthorized callers before EVM execution, even
-for historical reads, without quotes, or before the engine is ready.
+permission snapshot. `eth_call`, `eth_estimateGas`, `eth_simulateV1`, and
+`debug_traceCall` reject unauthorized callers before block lookup or state
+reconstruction, including historical reads, `txIndex` traces, calls without
+quotes, and calls before the engine is ready.
+
+For optional tracing, use `debug_traceCall`, the only allowed `debug_*` method.
+It applies the caller's overlay only to complete canonical-tip post-state
+without `txIndex`, before explicit user state overrides.
 
 Set `PUBLIC_RPC` to an ordinary BSC RPC for reads outside the relayer's fixed
 [18-method ETH allowlist](../docs/api-guide.md#1-connection--authentication).
-On HTTP/WS endpoints with `pamm` registered, other `eth_*` methods return
-`-32601`. Common chain / account queries and transaction / receipt lookups
-remain available without a taker key. You can poll `eth_getTransactionByHash`
-and `eth_getTransactionReceipt` directly on the relayer; both return null
-until inclusion. `eth_sendRawTransactionSync` uses the same taker submission
+Other `eth_*` methods return `-32601`. Common chain / account queries and
+transaction / receipt lookups remain available without a taker key. You can
+poll `eth_getTransactionByHash` and `eth_getTransactionReceipt` directly on
+the relayer; both return null until inclusion. `eth_sendRawTransactionSync` uses the same taker submission
 path and key requirement, but waits for a receipt and can return a timeout;
 a timeout does not cancel the accepted transaction.
 

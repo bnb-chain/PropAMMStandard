@@ -36,13 +36,18 @@ taker (plain wallet)
 `https://propamm.bnbchain.org` / `wss://propamm.bnbchain.org`。从 console 获取
 `MAKER_API_KEY` / `TAKER_API_KEY`（见
 [`docs/onboarding.zh-CN.md`](../docs/onboarding.zh-CN.md) 第 0 步）；它们以
-`x-api-key` 发送，relayer 在内存中对照 console 的权限快照解析。配置
-console 时，`eth_call`、`eth_estimateGas` 和 `eth_simulateV1` 均在 EVM
-执行前拒绝未授权调用，历史读取、没有报价或引擎未就绪时也一样。
+`x-api-key` 发送，relayer 在内存中对照 console 的权限快照解析。
+`eth_call`、`eth_estimateGas`、`eth_simulateV1`
+和 `debug_traceCall` 均在查询区块或重建状态前拒绝未授权调用，历史读取、
+`txIndex` trace、没有报价或引擎未就绪时也一样。
+
+可选的 trace 使用 `debug_traceCall`，这是唯一允许的 `debug_*` 方法。
+它只对不带 `txIndex` 的规范链头
+完整块后状态套用调用方 overlay，之后再应用显式用户状态覆盖。
 
 将 `PUBLIC_RPC` 设为普通 BSC RPC，用于 relayer 固定
 [18 个 ETH 方法白名单](../docs/api-guide.zh-CN.md#1-连接与鉴权)以外的读取。
-注册了 `pamm` 的 HTTP/WS 端点对其余 `eth_*` 方法返回 `-32601`。
+其余 `eth_*` 方法返回 `-32601`。
 普通链 / 账户查询以及交易 / 回执查询仍可使用，无需 taker Key。
 可直接在 relayer 轮询 `eth_getTransactionByHash` 和
 `eth_getTransactionReceipt`，落地前两者都返回 null。

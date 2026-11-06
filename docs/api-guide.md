@@ -21,8 +21,7 @@ reference for both sides; the normative specification is
 The relayer serves HTTP and WebSocket JSON-RPC. Subscriptions
 (`pamm_subscribe`) are WebSocket-only; everything else works on both.
 
-When the `pamm` namespace is registered on an HTTP or WebSocket RPC server,
-its `eth` namespace is limited to these **18 methods**:
+The relayer's `eth` namespace is limited to these **18 methods**:
 
 | Group | Allowed methods |
 | --- | --- |
@@ -37,12 +36,16 @@ proofs, and alternative submission methods. The allowlist also applies to
 batch items; disallowed notifications are discarded without execution or
 response.
 
+On the same endpoint, `debug_traceCall` is the only allowed `debug_*`
+method; other `debug_*` calls return `-32601`. These method restrictions
+apply to individual calls, batch items, and notifications.
+
 One header carries identity:
 
 | Header | Who | Behavior |
 | --- | --- | --- |
 | `x-api-key` | maker | **Required** for `pamm_sendQuoteUpdateV1`, and must be a console-issued **maker** key. A keyless update is rejected with `missing maker API key (x-api-key header)`, an unknown key with `invalid API key`, and a valid key of the wrong role with `API key is not a maker key`. |
-| `x-api-key` | taker | **Required** on every taker-side call (submission, `pamm_` getters and subscriptions, `eth_call`, `eth_estimateGas`, and `eth_simulateV1`) — a missing, unknown or wrong-role key gets a distinct error (authorization row in §3.2). The key decides your view (public makers, plus the restricted makers that ticked you) and your builder routing. |
+| `x-api-key` | taker | **Required** on every taker-side call (submission, `pamm_` getters and subscriptions, and execution reads: `eth_call`, `eth_estimateGas`, `eth_simulateV1`, `debug_traceCall`) — a missing, unknown or wrong-role key gets a distinct error (authorization row in §3.2). The key decides your view (public makers, plus the restricted makers that ticked you) and your builder routing. |
 
 On WebSocket the header is read once from the upgrade handshake and applies
 to every call on that connection.
@@ -214,23 +217,25 @@ times a second.
 For every caller the relayer maintains a **view**: the merged, per-slot
 freshest write-set of all live quotes from the makers that caller may see —
 the public makers plus the restricted makers that ticked the caller's taker
-key. The view requires a valid taker key (§1). Simulation methods apply the
-view automatically:
+key. The view requires a valid taker key (§1). The following execution
+reads apply this view automatically:
 
 | Method | Behavior |
 | --- | --- |
 | `eth_call` | executed on chain state at the canonical tip **plus** the caller's overlay; explicit `stateOverride` arguments win over the overlay |
 | `eth_estimateGas` | same overlay as `eth_call` |
 | `eth_simulateV1` | the overlay is applied once, to the base state ahead of the first simulated block |
+| `debug_traceCall` | the caller's overlay is applied to complete canonical-tip post-state before explicit user state overrides; historical and mid-block `txIndex` traces use plain chain state |
 
 ```text
 simulated state = chain state at head + overlay(quotes in the caller's view) + caller's own state overrides
 ```
 
-- With a console configured, all three execution reads require a valid
-  taker key before EVM execution. Missing, invalid, or wrong-role keys are
-  refused with the authorization errors in §3.2; unauthorized calls do not
-  fall back to plain chain state.
+- All four execution reads require a valid taker key before block lookup or
+  state reconstruction, including historical and `txIndex` requests, calls
+  without quotes, and calls while the engine is not ready. Missing, invalid,
+  or wrong-role keys are refused with the authorization errors in §3.2;
+  unauthorized calls do not fall back to plain chain state.
 - The overlay applies only on the canonical head. Authorized calls to
   historical blocks or non-canonical blocks requested by hash run on plain
   state.

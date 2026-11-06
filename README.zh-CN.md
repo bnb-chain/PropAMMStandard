@@ -58,14 +58,16 @@ e2e/
 
 ## 关键性质
 
-- **Taker 走标准 RPC**——换的是 RPC 端点，不是交易模型。`eth_call`、
-  `eth_estimateGas` 和 `eth_simulateV1` 在规范链头套用调用方报价 overlay；
-  配置 console 时，三者均在 EVM 执行前要求有效 taker Key，历史读取和
-  没有 overlay 时也一样。
+- **Taker 走标准 RPC**——换的是 RPC 端点，不是交易模型。
+  `eth_call`、`eth_estimateGas`、`eth_simulateV1` 和 `debug_traceCall` 在
+  规范链头套用调用方报价 overlay（trace 要求完整块后状态，不带 `txIndex`）。
+  四者均在查询区块或重建状态前要求有效 taker Key，
+  历史读取和没有 overlay 时也一样。
   `eth_sendRawTransaction` 提交普通签名交易，`eth_sendRawTransactionSync`
-  等待回执。注册了 `pamm` 的 HTTP/WS 端点使用固定的
+  等待回执。Relayer 使用固定的
   [18 个 ETH 方法白名单](./docs/api-guide.zh-CN.md#1-连接与鉴权)，
-  包含交易和回执查询；其余 `eth_*` 方法返回 `-32601`。
+  包含交易和回执查询；`debug_*` 仅允许 `debug_traceCall`。
+  其余 `eth_*` / `debug_*` 方法返回 `-32601`。
 - **池子 push-payment**——`IPropAMM.swap` 从不对调用方 `transferFrom`；
   成交是在一笔交易里把 `tokenIn` 转进池子并调 `swap`（聚合器，或参考实现
   `ExamplePammTaker`）。不需要对池子授权，池子上也不会残留任何推入余额。
@@ -85,7 +87,8 @@ e2e/
   `seq` 防止旧更新在链上覆盖新更新。
 - **鉴权在 relayer 完成**——maker / taker API Key 由运营方 console 签发、
   绑定角色，relayer 每个请求在内存中校验。配置 console 时，报价上行要求
-  maker Key，taker 执行类读取、提交和 `pamm_` 读取 / 订阅要求 taker Key；
+  maker Key；taker 提交、`pamm_` 读取 / 订阅及执行类读取要求
+  taker Key；
   普通链 / 账户 / 交易 / 回执查询无需该 Key；
   maker 自主选择报价流公开或仅对勾选的 taker 可见。
 

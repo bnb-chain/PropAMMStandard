@@ -308,9 +308,9 @@ distinct error. The key decides:
 
 ### 2. Get quotes from PropAMM pools
 
-Relayer RPC endpoint: `https://propamm.bnbchain.org` (WebSocket subscriptions
-use `wss://` on the same host). HTTP/WS endpoints with `pamm` registered
-limit `eth_*` to a fixed [18-method allowlist](./api-guide.md#1-connection--authentication);
+Relayer RPC endpoint: `https://propamm.bnbchain.org` (WebSocket
+subscriptions use `wss://` on the same host). The relayer limits `eth_*` to
+a fixed [18-method allowlist](./api-guide.md#1-connection--authentication);
 other ETH methods return `-32601`. Common chain / account queries work on
 the relayer without a taker key. Use your ordinary BSC RPC for reads outside
 the list.
@@ -325,11 +325,16 @@ endpoint.** The simplest: point your pricing RPC at the relayer and call
 other pool; there is no PropAMM-specific request format. `eth_call` is
 answered on **chain state plus your quote overlay** (only at the canonical
 tip; explicit `stateOverride` arguments you pass still win over the overlay).
-With a console configured, `eth_call`,
-`eth_estimateGas`, and `eth_simulateV1` all require a valid taker key before
-EVM execution, including historical reads and calls with no available overlay
-or an engine that is not ready. Authorized historical reads use plain chain
-state.
+`eth_call`, `eth_estimateGas`, `eth_simulateV1`, and `debug_traceCall` all
+require a valid taker key before block lookup or state reconstruction,
+including historical reads, `txIndex` traces, and calls without an overlay
+or while the engine is not ready. Authorized historical reads use plain
+chain state.
+
+For tracing, use `debug_traceCall`, the only allowed `debug_*` method.
+Its overlay applies
+only to complete canonical-tip post-state without `txIndex`; explicit user
+state overrides win.
 
 **Option B — subscribe to state overrides from the relayer and simulate with
 `eth_call` on your own full node.** For takers who run their own simulation

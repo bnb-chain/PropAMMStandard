@@ -268,7 +268,7 @@ relayer 请求都放在 `x-api-key` 请求头里。
 ### 2. 获取 PropAMM Pool 的报价
 
 Relayer RPC 端点：`https://propamm.bnbchain.org`（WS 订阅走同一主机的
-`wss://`）。注册了 `pamm` 的 HTTP/WS 端点对 `eth_*` 使用固定的
+`wss://`）。Relayer 对 `eth_*` 使用固定的
 [18 个方法白名单](./api-guide.zh-CN.md#1-连接与鉴权)，其余 ETH 方法返回
 `-32601`。普通链 / 账户查询可直接在 relayer 上进行，无需 taker Key。
 白名单以外的读取请走普通 BSC RPC。
@@ -280,10 +280,14 @@ PropAMM 池子的价格来自 maker 的报价 overlay，只有 relayer 知道；
 RPC 指向 relayer，像调任何普通池子一样调 `IPropAMM.quote`（或直接模拟你
 整笔成交交易），没有 PropAMM 专用的请求格式。`eth_call`
 在**链上状态加你的报价 overlay** 上作答（只对规范链头生效；你显式传的
-`stateOverride` 参数仍优先于 overlay）。配置 console 时，`eth_call`、
-`eth_estimateGas` 和 `eth_simulateV1` 均在 EVM 执行前要求有效 taker Key，
-历史读取、没有可用 overlay 或引擎未就绪时也一样。通过鉴权后的历史读取
-使用原链上状态。
+`stateOverride` 参数仍优先于 overlay）。
+`eth_call`、`eth_estimateGas`、`eth_simulateV1` 和 `debug_traceCall` 均在
+查询区块或重建状态前要求有效 taker Key；历史读取、`txIndex` trace、
+没有 overlay 或引擎未就绪时也一样。通过鉴权后的历史读取使用原链上状态。
+
+需要 trace 时，使用 `debug_traceCall`，这是唯一允许的 `debug_*` 方法。
+它只对不带 `txIndex` 的规范链头完整块后状态
+套用 overlay，显式用户状态覆盖优先。
 
 **方式 B：从 relayer 订阅 state override，在本地全节点用 `eth_call`
 模拟。** 适合自建模拟设施、不想把定价流量打到 relayer 的 taker：
